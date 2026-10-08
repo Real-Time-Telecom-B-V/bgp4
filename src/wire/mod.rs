@@ -26,7 +26,7 @@ pub use community::{Community, ExtendedCommunity, LargeCommunity};
 pub use error::{DecodeError, DecodeErrorReason, EncodeError};
 pub use header::{Header, MessageType, HEADER_LENGTH, MAXIMUM_MESSAGE_LENGTH};
 pub use keepalive::Keepalive;
-pub use nlri::Ipv4Prefix;
+pub use nlri::{Ipv4Prefix, Ipv6NextHop, Ipv6Prefix};
 pub use notification::{
     CeaseError, ErrorCode, FiniteStateMachineError, MessageHeaderError, Notification, OpenError,
     UpdateError,

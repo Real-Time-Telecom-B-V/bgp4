@@ -16,9 +16,9 @@ use std::net::Ipv4Addr;
 
 use bgp4::wire::{
     AddressFamily, Aggregator, AsPath, AsPathSegment, Capability, CeaseError, Community, ErrorCode,
-    ExtendedCommunity, FiniteStateMachineError, Header, Ipv4Prefix, Keepalive, LargeCommunity,
-    Notification, Open, OpenError, Origin, PathAttributes, SegmentKind, SessionType,
-    UnknownAttribute, Update, UpdateContext,
+    ExtendedCommunity, FiniteStateMachineError, Header, Ipv4Prefix, Ipv6NextHop, Ipv6Prefix,
+    Keepalive, LargeCommunity, Notification, Open, OpenError, Origin, PathAttributes, SegmentKind,
+    SessionType, UnknownAttribute, Update, UpdateContext,
 };
 use bytes::{Bytes, BytesMut};
 
@@ -374,6 +374,7 @@ fn update_with_every_base_attribute() {
         withdrawn: vec![prefix(192, 0, 2, 128, 25)],
         attributes,
         announced: vec![prefix(198, 51, 100, 0, 24), prefix(203, 0, 113, 64, 26)],
+        ..Update::default()
     };
     let fields = dissect(
         "update_base",
@@ -449,6 +450,7 @@ fn update_with_two_octet_as_numbers_and_every_segment_kind() {
         withdrawn: Vec::new(),
         attributes,
         announced: vec![prefix(198, 51, 100, 0, 24)],
+        ..Update::default()
     };
     let fields = dissect(
         "update_two_octet",
@@ -485,6 +487,7 @@ fn update_with_an_unknown_attribute_longer_than_255_octets() {
         withdrawn: Vec::new(),
         attributes,
         announced: vec![prefix(198, 51, 100, 0, 24)],
+        ..Update::default()
     };
     let fields = dissect(
         "update_unknown",
@@ -561,6 +564,7 @@ fn update_toward_an_internal_peer_with_communities_and_reflection_attributes() {
         withdrawn: Vec::new(),
         attributes,
         announced: vec![prefix(198, 51, 100, 0, 24)],
+        ..Update::default()
     };
     let fields = dissect(
         "update_communities",
@@ -597,6 +601,112 @@ fn update_toward_an_internal_peer_with_communities_and_reflection_attributes() {
             "1",
             "2",
             "65551",
+        ]
+    );
+}
+
+fn ipv6_prefix(address: &str, length: u8) -> Ipv6Prefix {
+    Ipv6Prefix::new(address.parse().expect("address"), length).expect("valid prefix")
+}
+
+#[test]
+fn update_for_ipv6_unicast() {
+    if !wireshark_available() {
+        return;
+    }
+    let mut attributes = PathAttributes::default();
+    attributes.origin = Some(Origin::Igp);
+    attributes.as_path = Some(AsPath::sequence([64496]));
+    let update = Update {
+        attributes,
+        ipv6_withdrawn: vec![ipv6_prefix("2001:db8:300::", 48)],
+        ipv6_next_hop: Some(Ipv6NextHop {
+            global: "2001:db8:0:1::11".parse().expect("address"),
+            link_local: Some("fe80::200:5eff:fe00:5301".parse().expect("address")),
+        }),
+        ipv6_announced: vec![
+            ipv6_prefix("2001:db8:100::", 48),
+            ipv6_prefix("2001:db8:200:1::7", 128),
+        ],
+        ..Update::default()
+    };
+    let fields = dissect(
+        "update_ipv6",
+        &encode_update(&update, UpdateContext::new(true, SessionType::External)),
+        &[
+            "bgp.update.path_attribute.type_code",
+            "bgp.update.path_attribute.flags",
+            "bgp.update.path_attribute.mp_reach_nlri.afi",
+            "bgp.update.path_attribute.mp_reach_nlri.safi",
+            "bgp.update.path_attribute.mp_reach_nlri.next_hop.ipv6",
+            "bgp.update.path_attribute.mp_reach_nlri.next_hop.ipv6.link_local",
+            "bgp.mp_reach_nlri_ipv6_prefix",
+            "bgp.update.path_attribute.mp_unreach_nlri.afi",
+            "bgp.update.path_attribute.mp_unreach_nlri.safi",
+            "bgp.mp_unreach_nlri_ipv6_prefix",
+            "bgp.prefix_length",
+        ],
+    );
+    assert_eq!(
+        fields,
+        [
+            // RFC 7606 section 5.1: the multiprotocol attributes come first.
+            "14,15,1,2",
+            "0x80,0x80,0x40,0x40",
+            "2",
+            "1",
+            "2001:db8:0:1::11",
+            "fe80::200:5eff:fe00:5301",
+            "2001:db8:100::,2001:db8:200:1::7",
+            "2",
+            "1",
+            "2001:db8:300::",
+            "48,128,48",
+        ]
+    );
+}
+
+#[test]
+fn update_with_a_four_octet_as_number_on_a_two_octet_session() {
+    if !wireshark_available() {
+        return;
+    }
+    let mut attributes = PathAttributes::default();
+    attributes.origin = Some(Origin::Igp);
+    attributes.as_path = Some(AsPath::sequence([64496, 65550]));
+    attributes.next_hop = Some(Ipv4Addr::new(192, 0, 2, 1));
+    attributes.aggregator = Some(Aggregator {
+        autonomous_system: 65551,
+        address: Ipv4Addr::new(192, 0, 2, 9),
+    });
+    let update = Update {
+        attributes,
+        announced: vec![prefix(198, 51, 100, 0, 24)],
+        ..Update::default()
+    };
+    let fields = dissect(
+        "update_as4_path",
+        &encode_update(&update, UpdateContext::new(false, SessionType::External)),
+        &[
+            "bgp.update.path_attribute.type_code",
+            "bgp.update.path_attribute.flags",
+            "bgp.update.path_attribute.as_path_segment.as2",
+            "bgp.update.path_attribute.as_path_segment.as4",
+            "bgp.update.path_attribute.aggregator_as",
+            "bgp.update.path_attribute.aggregator_origin",
+        ],
+    );
+    assert_eq!(
+        fields,
+        [
+            // AS_PATH and AGGREGATOR with AS_TRANS, then AS4_PATH and
+            // AS4_AGGREGATOR with the real numbers.
+            "1,2,3,7,17,18",
+            "0x40,0x40,0x40,0xc0,0xc0,0xc0",
+            "64496,23456",
+            "64496,65550",
+            "23456,65551",
+            "192.0.2.9,192.0.2.9",
         ]
     );
 }

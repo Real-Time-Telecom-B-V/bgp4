@@ -3,12 +3,12 @@
 use bytes::{BufMut, Bytes, BytesMut};
 
 use super::attribute::{
-    AttributeError, AttributeErrorAction, PathAttributes, AS_PATH, LOCAL_PREFERENCE, NEXT_HOP,
-    ORIGIN,
+    AttributeError, AttributeErrorAction, DecodedAttributes, PathAttributes, AS_PATH,
+    LOCAL_PREFERENCE, NEXT_HOP, ORIGIN,
 };
 use super::error::{DecodeError, DecodeErrorReason, EncodeError};
 use super::header::{Header, MessageType, HEADER_LENGTH};
-use super::nlri::Ipv4Prefix;
+use super::nlri::{Ipv4Prefix, Ipv6NextHop, Ipv6Prefix};
 use super::notification::UpdateError;
 use super::reader::Reader;
 
@@ -55,6 +55,12 @@ pub struct Update {
     pub attributes: PathAttributes,
     /// IPv4 routes that are announced.
     pub announced: Vec<Ipv4Prefix>,
+    /// IPv6 routes that are withdrawn (MP_UNREACH_NLRI).
+    pub ipv6_withdrawn: Vec<Ipv6Prefix>,
+    /// The next hop of the announced IPv6 routes (MP_REACH_NLRI).
+    pub ipv6_next_hop: Option<Ipv6NextHop>,
+    /// IPv6 routes that are announced (MP_REACH_NLRI).
+    pub ipv6_announced: Vec<Ipv6Prefix>,
 }
 
 /// An UPDATE as decoded, together with what had to be repaired on the way.
@@ -107,16 +113,23 @@ impl Update {
         let mut announced = Ipv4Prefix::decode_all(&mut reader).map_err(invalid_network)?;
 
         let mut errors = Vec::new();
-        let (mut attributes, mut treat_as_withdraw) =
-            PathAttributes::decode(attributes_reader, context, &mut errors)?;
+        let DecodedAttributes {
+            mut attributes,
+            mut ipv6,
+            mut treat_as_withdraw,
+        } = PathAttributes::decode(attributes_reader, context, &mut errors)?;
 
         // RFC 7606 section 3.d: a missing mandatory attribute is
         // treat-as-withdraw. They are mandatory only when a route is announced.
-        if !treat_as_withdraw && !announced.is_empty() {
+        if !treat_as_withdraw && (!announced.is_empty() || !ipv6.announced.is_empty()) {
             let missing = [
                 (ORIGIN, attributes.origin.is_none()),
                 (AS_PATH, attributes.as_path.is_none()),
-                (NEXT_HOP, attributes.next_hop.is_none()),
+                // NEXT_HOP is for the IPv4 routes; IPv6 ones carry their own.
+                (
+                    NEXT_HOP,
+                    !announced.is_empty() && attributes.next_hop.is_none(),
+                ),
                 // RFC 4271 section 5.1.5: mandatory toward internal peers.
                 (
                     LOCAL_PREFERENCE,
@@ -139,6 +152,8 @@ impl Update {
 
         if treat_as_withdraw {
             withdrawn.append(&mut announced);
+            ipv6.withdrawn.append(&mut ipv6.announced);
+            ipv6.next_hop = None;
             attributes = PathAttributes::default();
         }
 
@@ -147,6 +162,9 @@ impl Update {
                 withdrawn,
                 attributes,
                 announced,
+                ipv6_withdrawn: ipv6.withdrawn,
+                ipv6_next_hop: ipv6.next_hop,
+                ipv6_announced: ipv6.announced,
             },
             errors,
         })
@@ -155,16 +173,19 @@ impl Update {
     /// Append the whole message, header included, to `buffer`.
     ///
     /// Refuses to write an UPDATE that a receiver would have to repair: one
-    /// that announces a route without ORIGIN, AS_PATH and NEXT_HOP (and
+    /// that announces a route without ORIGIN, AS_PATH and its next hop (and
     /// LOCAL_PREF toward an internal peer), or that carries toward an external
     /// peer an attribute that has no meaning there. Nothing
     /// is written when the message cannot be encoded or does not fit.
     pub fn encode(&self, context: UpdateContext, buffer: &mut BytesMut) -> Result<(), EncodeError> {
-        if !self.announced.is_empty() {
+        if !self.announced.is_empty() || !self.ipv6_announced.is_empty() {
             let mandatory = [
                 (ORIGIN, self.attributes.origin.is_none()),
                 (AS_PATH, self.attributes.as_path.is_none()),
-                (NEXT_HOP, self.attributes.next_hop.is_none()),
+                (
+                    NEXT_HOP,
+                    !self.announced.is_empty() && self.attributes.next_hop.is_none(),
+                ),
                 (
                     LOCAL_PREFERENCE,
                     context.session_type == SessionType::Internal
@@ -183,7 +204,13 @@ impl Update {
             prefix.encode(&mut withdrawn);
         }
         let mut attributes = BytesMut::new();
-        self.attributes.encode(context, &mut attributes)?;
+        self.attributes.encode(
+            context,
+            self.ipv6_next_hop,
+            &self.ipv6_announced,
+            &self.ipv6_withdrawn,
+            &mut attributes,
+        )?;
         let mut announced = BytesMut::new();
         for prefix in &self.announced {
             prefix.encode(&mut announced);
@@ -859,9 +886,9 @@ mod tests {
             ..PathAttributes::default()
         };
         Update {
-            withdrawn: Vec::new(),
             attributes,
             announced: vec![prefix()],
+            ..Update::default()
         }
     }
 
@@ -991,5 +1018,297 @@ mod tests {
             encode(&update),
             Err(EncodeError::MessageTooLong { length: 4097 })
         );
+    }
+
+    /// MP_REACH_NLRI for IPv6 unicast: next hop 2001:db8:0:1::11, one route
+    /// 2001:db8:100::/48.
+    const MP_REACH: &[u8] = &[
+        0x80, 14, 28, 0, 2, 1, 16, 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0x11,
+        0, 48, 0x20, 0x01, 0x0d, 0xb8, 0x01, 0x00,
+    ];
+    /// MP_UNREACH_NLRI for IPv6 unicast: 2001:db8:300::/48.
+    const MP_UNREACH: &[u8] = &[
+        0x80, 15, 10, 0, 2, 1, 48, 0x20, 0x01, 0x0d, 0xb8, 0x03, 0x00,
+    ];
+
+    fn ipv6_prefix(address: &str) -> Ipv6Prefix {
+        Ipv6Prefix::new(address.parse().expect("address"), 48).expect("valid")
+    }
+
+    fn decode_without_nlri(
+        context: UpdateContext,
+        attributes: &[&[u8]],
+    ) -> Result<DecodedUpdate, DecodeError> {
+        Update::decode(body(&[], attributes, &[]), context)
+    }
+
+    #[test]
+    fn ipv6_routes_with_a_global_next_hop_only() {
+        let decoded = decode_without_nlri(
+            TWO_OCTET,
+            &[MP_REACH, MP_UNREACH, ORIGIN_IGP, AS_PATH_64496],
+        )
+        .expect("valid");
+        assert_eq!(decoded.errors, []);
+        let update = decoded.update;
+        assert_eq!(update.ipv6_announced, [ipv6_prefix("2001:db8:100::")]);
+        assert_eq!(update.ipv6_withdrawn, [ipv6_prefix("2001:db8:300::")]);
+        assert_eq!(
+            update.ipv6_next_hop,
+            Some(Ipv6NextHop {
+                global: "2001:db8:0:1::11".parse().expect("address"),
+                link_local: None,
+            })
+        );
+        // NEXT_HOP is not required: there is no IPv4 route.
+        assert_eq!(update.attributes.next_hop, None);
+    }
+
+    #[test]
+    fn ipv6_routes_still_need_origin_and_as_path() {
+        let decoded = decode_without_nlri(TWO_OCTET, &[MP_REACH, AS_PATH_64496]).expect("no reset");
+        assert_eq!(decoded.errors.len(), 1);
+        assert_eq!(decoded.errors[0].type_code, Some(1));
+        assert_eq!(
+            decoded.errors[0].subcode,
+            UpdateError::MissingWellKnownAttribute
+        );
+        // Treat-as-withdraw reaches the IPv6 routes too.
+        assert!(decoded.update.ipv6_announced.is_empty());
+        assert_eq!(
+            decoded.update.ipv6_withdrawn,
+            [ipv6_prefix("2001:db8:100::")]
+        );
+        assert_eq!(decoded.update.ipv6_next_hop, None);
+    }
+
+    #[test]
+    fn wrong_flags_on_a_multiprotocol_attribute_are_treat_as_withdraw() {
+        let mut transitive = MP_REACH.to_vec();
+        transitive[0] = 0xc0;
+        let decoded =
+            decode_without_nlri(TWO_OCTET, &[&transitive, ORIGIN_IGP, AS_PATH_64496]).expect("ok");
+        assert_eq!(
+            decoded.errors,
+            [withdraw_error(
+                Some(14),
+                23,
+                UpdateError::AttributeFlagsError
+            )]
+        );
+        assert_eq!(
+            decoded.update.ipv6_withdrawn,
+            [ipv6_prefix("2001:db8:100::")]
+        );
+    }
+
+    #[test]
+    fn a_multiprotocol_attribute_that_cannot_be_parsed_resets_the_session() {
+        // Next hop length 17; next hop running past the attribute; no room
+        // for the address family.
+        let bad_next_hop_length: &[u8] = &[
+            0x80, 14, 22, 0, 2, 1, 17, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        ];
+        let short_next_hop: &[u8] = &[0x80, 14, 6, 0, 2, 1, 16, 0, 0];
+        let no_family: &[u8] = &[0x80, 15, 2, 0, 2];
+        for (attribute, type_code) in [
+            (bad_next_hop_length, 14),
+            (short_next_hop, 14),
+            (no_family, 15),
+        ] {
+            let error = decode_without_nlri(TWO_OCTET, &[ORIGIN_IGP, attribute])
+                .expect_err("session reset");
+            assert_eq!(
+                error.reason(),
+                DecodeErrorReason::MalformedMultiprotocolAttribute { type_code }
+            );
+            assert_eq!(error.offset(), 27);
+            let notification = error.notification();
+            assert_eq!(
+                notification.error(),
+                ErrorCode::Update(UpdateError::OptionalAttributeError)
+            );
+            assert_eq!(notification.data().as_ref(), attribute);
+        }
+    }
+
+    #[test]
+    fn an_ipv6_prefix_that_cannot_be_parsed_resets_the_session() {
+        let attribute: &[u8] = &[0x80, 15, 4, 0, 2, 1, 129];
+        let error = decode_without_nlri(TWO_OCTET, &[attribute]).expect_err("session reset");
+        assert_eq!(error.reason(), DecodeErrorReason::InvalidNetworkField);
+        assert_eq!(error.offset(), 29);
+    }
+
+    #[test]
+    fn a_repeated_multiprotocol_attribute_resets_the_session() {
+        let error =
+            decode_without_nlri(TWO_OCTET, &[MP_UNREACH, MP_UNREACH]).expect_err("session reset");
+        assert_eq!(error.reason(), DecodeErrorReason::MalformedAttributeList);
+        assert_eq!(error.offset(), 36);
+    }
+
+    #[test]
+    fn a_multiprotocol_attribute_for_another_family_is_ignored() {
+        // IPv4 multicast (1/2), which this crate never negotiates.
+        let attribute: &[u8] = &[0x80, 15, 5, 0, 1, 2, 8, 10];
+        let decoded = decode_without_nlri(TWO_OCTET, &[attribute]).expect("no reset");
+        assert_eq!(decoded.update, Update::default());
+        assert_eq!(
+            decoded.errors,
+            [AttributeError {
+                type_code: Some(15),
+                offset: 23,
+                action: AttributeErrorAction::AttributeDiscard,
+                subcode: UpdateError::OptionalAttributeError,
+            }]
+        );
+    }
+
+    #[test]
+    fn ipv6_routes_cannot_be_announced_without_a_next_hop() {
+        let mut update = announcement();
+        update.ipv6_announced = vec![ipv6_prefix("2001:db8:100::")];
+        assert_eq!(encode(&update), Err(EncodeError::MissingIpv6NextHop));
+    }
+
+    /// AS_SEQUENCE of 64496 then AS_TRANS, 2 octets wide.
+    const AS_PATH_WITH_AS_TRANS: &[u8] = &[0x40, 2, 6, 2, 2, 0xfb, 0xf0, 0x5b, 0xa0];
+    /// AS4_PATH: AS_SEQUENCE of 64496, 65550.
+    const AS4_PATH: &[u8] = &[0xc0, 17, 10, 2, 2, 0, 0, 0xfb, 0xf0, 0, 1, 0, 14];
+    /// AGGREGATOR with AS_TRANS, and the AS4_AGGREGATOR that names AS 65551.
+    const AGGREGATOR_AS_TRANS: &[u8] = &[0xc0, 7, 6, 0x5b, 0xa0, 192, 0, 2, 9];
+    const AS4_AGGREGATOR: &[u8] = &[0xc0, 18, 8, 0, 1, 0, 15, 192, 0, 2, 9];
+
+    #[test]
+    fn as4_attributes_restore_the_path_and_the_aggregator() {
+        let decoded = decode(&[
+            ORIGIN_IGP,
+            AS_PATH_WITH_AS_TRANS,
+            NEXT_HOP_192_0_2_1,
+            AGGREGATOR_AS_TRANS,
+            AS4_PATH,
+            AS4_AGGREGATOR,
+        ]);
+        assert_eq!(decoded.errors, []);
+        let attributes = decoded.update.attributes;
+        assert_eq!(attributes.as_path, Some(AsPath::sequence([64496, 65550])));
+        assert_eq!(
+            attributes.aggregator,
+            Some(Aggregator {
+                autonomous_system: 65551,
+                address: Ipv4Addr::new(192, 0, 2, 9)
+            })
+        );
+        assert!(attributes.unknown.is_empty());
+    }
+
+    #[test]
+    fn an_aggregator_that_is_not_as_trans_voids_both_as4_attributes() {
+        // RFC 6793 section 4.2.3: a speaker without AS4 support aggregated on
+        // the way, so AS4_PATH no longer describes the route.
+        let decoded = decode(&[
+            ORIGIN_IGP,
+            AS_PATH_WITH_AS_TRANS,
+            NEXT_HOP_192_0_2_1,
+            &[0xc0, 7, 6, 0xfb, 0xf1, 192, 0, 2, 9],
+            AS4_PATH,
+            AS4_AGGREGATOR,
+        ]);
+        assert_eq!(decoded.errors, []);
+        let attributes = decoded.update.attributes;
+        assert_eq!(attributes.as_path, Some(AsPath::sequence([64496, 23456])));
+        assert_eq!(
+            attributes
+                .aggregator
+                .map(|aggregator| aggregator.autonomous_system),
+            Some(64497)
+        );
+    }
+
+    #[test]
+    fn malformed_as4_attributes_are_discarded() {
+        let decoded = decode(&[
+            ORIGIN_IGP,
+            AS_PATH_WITH_AS_TRANS,
+            NEXT_HOP_192_0_2_1,
+            AGGREGATOR_AS_TRANS,
+            &[0xc0, 17, 3, 2, 2, 0],
+            &[0xc0, 18, 6, 0, 1, 0, 15, 192, 0],
+        ]);
+        assert_eq!(decoded.update.announced, [prefix()]);
+        assert_eq!(
+            decoded.update.attributes.as_path,
+            Some(AsPath::sequence([64496, 23456]))
+        );
+        let discarded: Vec<(Option<u8>, AttributeErrorAction, UpdateError)> = decoded
+            .errors
+            .iter()
+            .map(|error| (error.type_code, error.action, error.subcode))
+            .collect();
+        assert_eq!(
+            discarded,
+            [
+                (
+                    Some(17),
+                    AttributeErrorAction::AttributeDiscard,
+                    UpdateError::MalformedAsPath
+                ),
+                (
+                    Some(18),
+                    AttributeErrorAction::AttributeDiscard,
+                    UpdateError::AttributeLengthError
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn as4_attributes_are_discarded_on_a_four_octet_session() {
+        let decoded = Update::decode(
+            body(
+                &[],
+                &[
+                    ORIGIN_IGP,
+                    &[0x40, 2, 6, 2, 1, 0, 0, 0xfb, 0xf0],
+                    NEXT_HOP_192_0_2_1,
+                    AS4_PATH,
+                    AS4_AGGREGATOR,
+                ],
+                NLRI,
+            ),
+            FOUR_OCTET,
+        )
+        .expect("no reset");
+        assert_eq!(
+            decoded.update.attributes.as_path,
+            Some(AsPath::sequence([64496]))
+        );
+        assert_eq!(decoded.update.attributes.aggregator, None);
+        let discarded: Vec<Option<u8>> =
+            decoded.errors.iter().map(|error| error.type_code).collect();
+        assert_eq!(discarded, [Some(17), Some(18)]);
+    }
+
+    #[test]
+    fn as4_path_is_sent_only_when_an_as_number_needs_it() {
+        let type_codes = |update: &Update| -> Vec<u8> {
+            let wire = encode(update).expect("valid");
+            let mut reader = Reader::new(Bytes::copy_from_slice(&wire), 0);
+            reader.take(HEADER_LENGTH + 4).expect("fixed part");
+            let mut seen = Vec::new();
+            // Three short attributes, then whatever follows up to the NLRI.
+            while reader.remaining() > NLRI.len() {
+                let _flags = reader.u8().expect("flags");
+                seen.push(reader.u8().expect("type code"));
+                let length = reader.u8().expect("length");
+                reader.take(usize::from(length)).expect("value");
+            }
+            seen
+        };
+        let mut update = announcement();
+        assert_eq!(type_codes(&update), [1, 2, 3]);
+        update.attributes.as_path = Some(AsPath::sequence([64496, 65550]));
+        assert_eq!(type_codes(&update), [1, 2, 3, 17]);
     }
 }

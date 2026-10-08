@@ -85,6 +85,85 @@ impl AsPath {
         })
     }
 
+    /// The length of the path as the decision process counts it (RFC 4271
+    /// section 9.1.2.2, RFC 5065 section 5.3): one per AS in a sequence, one
+    /// for a whole set, nothing for confederation segments.
+    pub fn path_length(&self) -> usize {
+        self.segments
+            .iter()
+            .map(|segment| match segment.kind {
+                SegmentKind::Sequence => segment.autonomous_systems.len(),
+                SegmentKind::Set => 1,
+                SegmentKind::ConfederationSequence | SegmentKind::ConfederationSet => 0,
+            })
+            .sum()
+    }
+
+    /// Whether any AS number of the path needs more than 2 octets.
+    pub(crate) fn needs_four_octets(&self) -> bool {
+        self.segments
+            .iter()
+            .flat_map(|segment| &segment.autonomous_systems)
+            .any(|autonomous_system| *autonomous_system > u32::from(u16::MAX))
+    }
+
+    /// The path without its confederation segments, which is what goes into
+    /// AS4_PATH (RFC 6793 section 3).
+    pub(crate) fn without_confederation_segments(&self) -> AsPath {
+        AsPath {
+            segments: self
+                .segments
+                .iter()
+                .filter(|segment| matches!(segment.kind, SegmentKind::Sequence | SegmentKind::Set))
+                .cloned()
+                .collect(),
+        }
+    }
+
+    /// Rebuild the real path from an AS_PATH received on a 2-octet session and
+    /// the AS4_PATH that came with it (RFC 6793 section 4.2.3).
+    ///
+    /// The AS_PATH is as long as the AS4_PATH or longer, by the speakers that
+    /// did not know AS4_PATH and prepended only to AS_PATH. Those leading AS
+    /// numbers are kept and the AS4_PATH follows. An AS4_PATH that is longer
+    /// than the AS_PATH is ignored.
+    pub(crate) fn merged_with_as4_path(self, as4_path: AsPath) -> AsPath {
+        // RFC 6793 section 6: confederation segments do not belong in
+        // AS4_PATH and are dropped from it.
+        let as4_path = as4_path.without_confederation_segments();
+        let own = self.path_length();
+        let wide = as4_path.path_length();
+        if own < wide {
+            return self;
+        }
+        let mut keep = own - wide;
+        let mut segments: Vec<AsPathSegment> = Vec::new();
+        for mut segment in self.segments {
+            match segment.kind {
+                SegmentKind::ConfederationSequence | SegmentKind::ConfederationSet => {}
+                _ if keep == 0 => break,
+                SegmentKind::Set => keep -= 1,
+                SegmentKind::Sequence => {
+                    segment.autonomous_systems.truncate(keep);
+                    keep -= segment.autonomous_systems.len();
+                }
+            }
+            segments.push(segment);
+        }
+        for segment in as4_path.segments {
+            match segments.last_mut() {
+                Some(last)
+                    if last.kind == SegmentKind::Sequence
+                        && segment.kind == SegmentKind::Sequence =>
+                {
+                    last.autonomous_systems.extend(segment.autonomous_systems)
+                }
+                _ => segments.push(segment),
+            }
+        }
+        AsPath { segments }
+    }
+
     /// Decode the attribute value. `None` when it is malformed: an unknown
     /// segment type, an empty segment, or a segment cut short (RFC 7606
     /// section 7.2).
@@ -141,7 +220,7 @@ impl AsPath {
                 // `chunks` never yields more than 255 elements.
                 buffer.put_u8(u8::try_from(chunk.len()).unwrap_or(u8::MAX));
                 for autonomous_system in chunk {
-                    put_autonomous_system(*autonomous_system, four_octet, buffer)?;
+                    put_autonomous_system(*autonomous_system, four_octet, buffer);
                 }
             }
         }
@@ -149,20 +228,21 @@ impl AsPath {
     }
 }
 
-/// Append one AS number in the width the session negotiated.
+/// Stands in for an AS number that does not fit in 2 octets (RFC 6793).
+pub(crate) const AS_TRANS: u16 = 23456;
+
+/// Append one AS number in the width the session negotiated. On a 2-octet
+/// session a number that does not fit is replaced by AS_TRANS.
 pub(crate) fn put_autonomous_system(
     autonomous_system: u32,
     four_octet: bool,
     buffer: &mut BytesMut,
-) -> Result<(), EncodeError> {
+) {
     if four_octet {
         buffer.put_u32(autonomous_system);
     } else {
-        let narrow = u16::try_from(autonomous_system)
-            .map_err(|_| EncodeError::AutonomousSystemNeedsFourOctets { autonomous_system })?;
-        buffer.put_u16(narrow);
+        buffer.put_u16(u16::try_from(autonomous_system).unwrap_or(AS_TRANS));
     }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -271,12 +351,87 @@ mod tests {
     }
 
     #[test]
-    fn a_four_octet_as_number_does_not_fit_a_two_octet_session() {
+    fn a_four_octet_as_number_becomes_as_trans_on_a_two_octet_session() {
         assert_eq!(
-            encode(&AsPath::sequence([65550]), false),
-            Err(EncodeError::AutonomousSystemNeedsFourOctets {
-                autonomous_system: 65550
-            })
+            encode(&AsPath::sequence([64496, 65550]), false),
+            Ok(vec![2, 2, 0xfb, 0xf0, 0x5b, 0xa0])
+        );
+        assert!(AsPath::sequence([64496, 65550]).needs_four_octets());
+        assert!(!AsPath::sequence([64496, 65535]).needs_four_octets());
+    }
+
+    fn segment(kind: SegmentKind, autonomous_systems: &[u32]) -> AsPathSegment {
+        AsPathSegment {
+            kind,
+            autonomous_systems: autonomous_systems.to_vec(),
+        }
+    }
+
+    #[test]
+    fn path_length_counts_a_set_once_and_confederation_segments_not_at_all() {
+        let path = AsPath {
+            segments: vec![
+                segment(SegmentKind::ConfederationSequence, &[64500, 64501]),
+                segment(SegmentKind::ConfederationSet, &[64502]),
+                segment(SegmentKind::Sequence, &[64496, 64497, 64498]),
+                segment(SegmentKind::Set, &[64499, 64503]),
+            ],
+        };
+        assert_eq!(path.path_length(), 4);
+        assert_eq!(AsPath::default().path_length(), 0);
+    }
+
+    #[test]
+    fn merging_an_as4_path_of_the_same_length_replaces_the_path() {
+        let merged = AsPath::sequence([64496, 23456, 64497])
+            .merged_with_as4_path(AsPath::sequence([64496, 65550, 64497]));
+        assert_eq!(merged, AsPath::sequence([64496, 65550, 64497]));
+    }
+
+    #[test]
+    fn merging_keeps_what_old_speakers_prepended() {
+        // Two speakers without AS4_PATH support prepended 64510 and 64511.
+        let merged = AsPath::sequence([64511, 64510, 23456, 64497])
+            .merged_with_as4_path(AsPath::sequence([65550, 64497]));
+        assert_eq!(merged, AsPath::sequence([64511, 64510, 65550, 64497]));
+    }
+
+    #[test]
+    fn an_as4_path_longer_than_the_path_is_ignored() {
+        let path = AsPath::sequence([23456, 64497]);
+        let merged = path
+            .clone()
+            .merged_with_as4_path(AsPath::sequence([65551, 65550, 64497]));
+        assert_eq!(merged, path);
+    }
+
+    #[test]
+    fn merging_keeps_leading_confederation_segments_and_counts_sets_once() {
+        let path = AsPath {
+            segments: vec![
+                segment(SegmentKind::ConfederationSequence, &[64500]),
+                segment(SegmentKind::Sequence, &[64511, 23456]),
+                segment(SegmentKind::Set, &[23456, 64497]),
+            ],
+        };
+        // The AS4_PATH covers the last AS of the sequence and the set, and
+        // wrongly carries a confederation segment of its own.
+        let as4_path = AsPath {
+            segments: vec![
+                segment(SegmentKind::ConfederationSequence, &[64509]),
+                segment(SegmentKind::Sequence, &[65550]),
+                segment(SegmentKind::Set, &[65551, 64497]),
+            ],
+        };
+        assert_eq!(
+            path.merged_with_as4_path(as4_path),
+            AsPath {
+                segments: vec![
+                    segment(SegmentKind::ConfederationSequence, &[64500]),
+                    segment(SegmentKind::Sequence, &[64511, 65550]),
+                    segment(SegmentKind::Set, &[65551, 64497]),
+                ],
+            }
         );
     }
 }

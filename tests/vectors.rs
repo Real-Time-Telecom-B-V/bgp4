@@ -5,13 +5,13 @@
 //! router configurations in that directory, not from this crate.
 
 use std::fs;
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::path::PathBuf;
 
 use bgp4::wire::{
     AddressFamily, AsPath, Capability, CeaseError, Community, ErrorCode, ExtendedCommunity, Header,
-    Ipv4Prefix, Keepalive, LargeCommunity, MessageType, Notification, Open, OpenError, Origin,
-    SessionType, Update, UpdateContext, HEADER_LENGTH,
+    Ipv4Prefix, Ipv6NextHop, Ipv6Prefix, Keepalive, LargeCommunity, MessageType, Notification,
+    Open, OpenError, Origin, SessionType, Update, UpdateContext, HEADER_LENGTH,
 };
 use bytes::Bytes;
 
@@ -197,11 +197,22 @@ fn bird_open_under_a_four_octet_as_number_uses_as_trans() {
 }
 
 const FOUR_OCTET: UpdateContext = UpdateContext::new(true, SessionType::External);
+const TWO_OCTET: UpdateContext = UpdateContext::new(false, SessionType::External);
+
+/// In the `two-octet-session` scenario BIRD does not announce the 4-octet AS
+/// capability, so AS numbers on that session are 2 octets wide.
+fn context(name: &str) -> UpdateContext {
+    if name.starts_with("two-octet-session-") {
+        TWO_OCTET
+    } else {
+        FOUR_OCTET
+    }
+}
 
 fn update(name: &str) -> Update {
     let bytes = load(name);
-    let decoded =
-        Update::decode(body(&bytes), FOUR_OCTET).unwrap_or_else(|error| panic!("{name}: {error}"));
+    let decoded = Update::decode(body(&bytes), context(name))
+        .unwrap_or_else(|error| panic!("{name}: {error}"));
     assert_eq!(decoded.errors, [], "{name}");
     decoded.update
 }
@@ -210,20 +221,41 @@ fn prefix(a: u8, b: u8, c: u8, d: u8, length: u8) -> Ipv4Prefix {
     Ipv4Prefix::new(Ipv4Addr::new(a, b, c, d), length).expect("valid prefix")
 }
 
-/// The update among `<scenario>-<sender>-update-NN.hex` that announces `wanted`.
-fn update_announcing(scenario: &str, sender: &str, wanted: Ipv4Prefix) -> Update {
+/// The one update among `<scenario>-<sender>-update-NN.hex` that `matches`
+/// picks. A router may send the same route twice, so duplicates are folded.
+fn the_update(scenario: &str, sender: &str, matches: impl Fn(&Update) -> bool) -> Update {
     let stem = format!("{scenario}-{sender}-update-");
-    let mut found = Vec::new();
+    let mut found: Vec<Update> = Vec::new();
     for (name, _) in all_vectors() {
         if name.starts_with(&stem) {
             let update = update(&name);
-            if update.announced.contains(&wanted) {
+            if matches(&update) && !found.contains(&update) {
                 found.push(update);
             }
         }
     }
-    assert_eq!(found.len(), 1, "{stem}*: updates announcing {wanted}");
+    assert_eq!(found.len(), 1, "{stem}*: {found:?}");
     found.remove(0)
+}
+
+fn update_announcing(scenario: &str, sender: &str, wanted: Ipv4Prefix) -> Update {
+    the_update(scenario, sender, |update| {
+        update.announced.contains(&wanted)
+    })
+}
+
+fn update_announcing_ipv6(scenario: &str, sender: &str, wanted: Ipv6Prefix) -> Update {
+    the_update(scenario, sender, |update| {
+        update.ipv6_announced.contains(&wanted)
+    })
+}
+
+fn ipv6_prefix(address: &str, length: u8) -> Ipv6Prefix {
+    Ipv6Prefix::new(address.parse().expect("address"), length).expect("valid prefix")
+}
+
+fn ipv6(address: &str) -> Ipv6Addr {
+    address.parse().expect("address")
 }
 
 #[test]
@@ -322,4 +354,81 @@ fn end_of_rib_marker_is_an_empty_update() {
         }
     }
     assert!(seen >= 2, "expected an end-of-RIB marker from each side");
+}
+
+/// scripts/vectors/frr.conf: network 2001:db8:100::/48 in the IPv6 unicast
+/// family of the same session. The next hop is the address the capture script
+/// gives the FRR container, with the link-local address of its fixed MAC.
+#[test]
+fn frr_ipv6_announcement() {
+    let update = update_announcing_ipv6("frr-shutdown", "frr", ipv6_prefix("2001:db8:100::", 48));
+    assert_eq!(update.ipv6_announced, [ipv6_prefix("2001:db8:100::", 48)]);
+    assert!(update.ipv6_withdrawn.is_empty());
+    assert!(update.announced.is_empty());
+    assert_eq!(
+        update.ipv6_next_hop,
+        Some(Ipv6NextHop {
+            global: ipv6("2001:db8:0:1::11"),
+            link_local: Some(ipv6("fe80::200:5eff:fe00:5301")),
+        })
+    );
+    let attributes = &update.attributes;
+    assert_eq!(attributes.origin, Some(Origin::Igp));
+    assert_eq!(attributes.as_path, Some(AsPath::sequence([64496, 64496])));
+    assert_eq!(attributes.next_hop, None);
+    assert_eq!(attributes.multi_exit_discriminator, Some(50));
+    assert_eq!(attributes.communities, [Community::new(64496, 100)]);
+}
+
+/// scripts/vectors/bird.conf: static 2001:db8:200::/48.
+#[test]
+fn bird_ipv6_announcement() {
+    let update = update_announcing_ipv6("frr-shutdown", "bird", ipv6_prefix("2001:db8:200::", 48));
+    assert_eq!(
+        update.ipv6_next_hop,
+        Some(Ipv6NextHop {
+            global: ipv6("2001:db8:0:1::12"),
+            link_local: Some(ipv6("fe80::200:5eff:fe00:5302")),
+        })
+    );
+    assert_eq!(update.attributes.as_path, Some(AsPath::sequence([64497])));
+    assert_eq!(update.attributes.multi_exit_discriminator, Some(70));
+}
+
+/// With `enable as4 off` BIRD sends no 4-octet AS capability, and the AS
+/// number comes from the 2-octet field.
+#[test]
+fn bird_open_without_the_four_octet_capability() {
+    let open = open("two-octet-session-bird-open-01.hex");
+    assert!(!open
+        .capabilities()
+        .iter()
+        .any(|capability| matches!(capability, Capability::FourOctetAutonomousSystem(_))));
+    assert_eq!(open.autonomous_system(), 64497);
+}
+
+/// The capture script adds `set as-path prepend 65550 64496` to FRR's export
+/// route map for this scenario, and FRR puts its own AS in front. Toward a
+/// peer without 4-octet AS numbers it sends AS_TRANS in AS_PATH and the real
+/// path in AS4_PATH; the decoder has to put the two back together.
+#[test]
+fn frr_as4_path_is_merged_back_into_the_path() {
+    let update = update_announcing("two-octet-session", "frr", prefix(198, 51, 100, 0, 24));
+    assert_eq!(
+        update.attributes.as_path,
+        Some(AsPath::sequence([64496, 65550, 64496]))
+    );
+    assert!(update.attributes.unknown.is_empty());
+
+    let readvertised = update_announcing("two-octet-session", "frr", prefix(203, 0, 113, 0, 24));
+    assert_eq!(
+        readvertised.attributes.as_path,
+        Some(AsPath::sequence([64496, 65550, 64496, 64497]))
+    );
+}
+
+#[test]
+fn bird_two_octet_as_path() {
+    let update = update_announcing("two-octet-session", "bird", prefix(203, 0, 113, 0, 24));
+    assert_eq!(update.attributes.as_path, Some(AsPath::sequence([64497])));
 }

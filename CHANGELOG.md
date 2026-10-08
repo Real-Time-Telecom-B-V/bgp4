@@ -38,3 +38,9 @@ the rules in [VERSIONING.md](VERSIONING.md).
   CLUSTER_LIST are discarded when received from an external peer and refused
   when sent to one, LOCAL_PREF is mandatory on internal sessions, and
   confederation segments from an external peer make the AS_PATH malformed.
+- `wire`: IPv6 unicast in UPDATE through MP_REACH_NLRI and MP_UNREACH_NLRI
+  (RFC 4760), with a global next hop and an optional link-local one. The
+  encoder puts the two attributes first (RFC 7606 section 5.1).
+- `wire`: sessions without 4-octet AS numbers (RFC 6793). The encoder sends
+  AS_TRANS with AS4_PATH and AS4_AGGREGATOR when an AS number needs them, and
+  the decoder merges them back into the path and the aggregator.

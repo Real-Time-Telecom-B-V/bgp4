@@ -15,8 +15,9 @@ use std::process::Command;
 use std::net::Ipv4Addr;
 
 use bgp4::wire::{
-    AddressFamily, Capability, CeaseError, ErrorCode, FiniteStateMachineError, Header, Keepalive,
-    Notification, Open, OpenError,
+    AddressFamily, Aggregator, AsPath, AsPathSegment, Capability, CeaseError, ErrorCode,
+    FiniteStateMachineError, Header, Ipv4Prefix, Keepalive, Notification, Open, OpenError, Origin,
+    PathAttributes, SegmentKind, UnknownAttribute, Update, UpdateContext,
 };
 use bytes::{Bytes, BytesMut};
 
@@ -340,4 +341,197 @@ fn open_carries_an_unknown_capability_untouched() {
         &["bgp.cap.type", "bgp.cap.length", "bgp.cap.unknown"],
     );
     assert_eq!(fields, ["200,65", "4,4", "deadbeef"]);
+}
+
+fn encode_update(update: &Update, context: UpdateContext) -> Vec<u8> {
+    let mut buffer = BytesMut::new();
+    update.encode(context, &mut buffer).expect("encode");
+    buffer.to_vec()
+}
+
+fn prefix(a: u8, b: u8, c: u8, d: u8, length: u8) -> Ipv4Prefix {
+    Ipv4Prefix::new(Ipv4Addr::new(a, b, c, d), length).expect("valid prefix")
+}
+
+#[test]
+fn update_with_every_base_attribute() {
+    if !wireshark_available() {
+        return;
+    }
+    let mut attributes = PathAttributes::default();
+    attributes.origin = Some(Origin::Incomplete);
+    attributes.as_path = Some(AsPath::sequence([64496, 65550]));
+    attributes.next_hop = Some(Ipv4Addr::new(192, 0, 2, 1));
+    attributes.multi_exit_discriminator = Some(50);
+    attributes.local_preference = Some(200);
+    attributes.atomic_aggregate = true;
+    attributes.aggregator = Some(Aggregator {
+        autonomous_system: 65551,
+        address: Ipv4Addr::new(192, 0, 2, 9),
+    });
+    let update = Update {
+        withdrawn: vec![prefix(192, 0, 2, 128, 25)],
+        attributes,
+        announced: vec![prefix(198, 51, 100, 0, 24), prefix(203, 0, 113, 64, 26)],
+    };
+    let fields = dissect(
+        "update_base",
+        &encode_update(&update, UpdateContext::new(true)),
+        &[
+            "bgp.type",
+            "bgp.withdrawn_prefix",
+            "bgp.nlri_prefix",
+            "bgp.prefix_length",
+            "bgp.update.path_attribute.type_code",
+            "bgp.update.path_attribute.flags",
+            "bgp.update.path_attribute.origin",
+            "bgp.update.path_attribute.as_path_segment.type",
+            "bgp.update.path_attribute.as_path_segment.as4",
+            "bgp.update.path_attribute.next_hop",
+            "bgp.update.path_attribute.multi_exit_disc",
+            "bgp.update.path_attribute.local_pref",
+            "bgp.update.path_attribute.aggregator_as",
+            "bgp.update.path_attribute.aggregator_origin",
+        ],
+    );
+    assert_eq!(
+        fields,
+        [
+            "2",
+            "192.0.2.128",
+            "198.51.100.0,203.0.113.64",
+            "25,24,26",
+            "1,2,3,4,5,6,7",
+            // well-known transitive, MED optional, AGGREGATOR optional transitive
+            "0x40,0x40,0x40,0x80,0x40,0x40,0xc0",
+            "2",
+            "2",
+            "64496,65550",
+            "192.0.2.1",
+            "50",
+            "200",
+            "65551",
+            "192.0.2.9",
+        ]
+    );
+}
+
+#[test]
+fn update_with_two_octet_as_numbers_and_every_segment_kind() {
+    if !wireshark_available() {
+        return;
+    }
+    let mut attributes = PathAttributes::default();
+    attributes.origin = Some(Origin::Igp);
+    attributes.as_path = Some(AsPath {
+        segments: vec![
+            AsPathSegment {
+                kind: SegmentKind::ConfederationSequence,
+                autonomous_systems: vec![64500],
+            },
+            AsPathSegment {
+                kind: SegmentKind::ConfederationSet,
+                autonomous_systems: vec![64501, 64502],
+            },
+            AsPathSegment {
+                kind: SegmentKind::Sequence,
+                autonomous_systems: vec![64496],
+            },
+            AsPathSegment {
+                kind: SegmentKind::Set,
+                autonomous_systems: vec![64497, 64498],
+            },
+        ],
+    });
+    attributes.next_hop = Some(Ipv4Addr::new(192, 0, 2, 1));
+    let update = Update {
+        withdrawn: Vec::new(),
+        attributes,
+        announced: vec![prefix(198, 51, 100, 0, 24)],
+    };
+    let fields = dissect(
+        "update_two_octet",
+        &encode_update(&update, UpdateContext::new(false)),
+        &[
+            "bgp.update.path_attribute.as_path_segment.type",
+            "bgp.update.path_attribute.as_path_segment.length",
+            "bgp.update.path_attribute.as_path_segment.as2",
+        ],
+    );
+    assert_eq!(
+        fields,
+        ["3,4,2,1", "1,2,1,2", "64500,64501,64502,64496,64497,64498"]
+    );
+}
+
+#[test]
+fn update_with_an_unknown_attribute_longer_than_255_octets() {
+    if !wireshark_available() {
+        return;
+    }
+    let mut attributes = PathAttributes::default();
+    attributes.origin = Some(Origin::Igp);
+    attributes.as_path = Some(AsPath::default());
+    attributes.next_hop = Some(Ipv4Addr::new(192, 0, 2, 1));
+    attributes
+        .unknown
+        .push(UnknownAttribute::new(200, Bytes::from(vec![0xab; 300])));
+    attributes.unknown.push(UnknownAttribute::forwarded(
+        201,
+        Bytes::from_static(&[1, 2, 3]),
+    ));
+    let update = Update {
+        withdrawn: Vec::new(),
+        attributes,
+        announced: vec![prefix(198, 51, 100, 0, 24)],
+    };
+    let fields = dissect(
+        "update_unknown",
+        &encode_update(&update, UpdateContext::new(true)),
+        &[
+            "bgp.update.path_attribute.type_code",
+            "bgp.update.path_attribute.flags",
+            "bgp.update.path_attribute.length",
+            "bgp.nlri_prefix",
+        ],
+    );
+    // Optional transitive with extended length, then optional transitive partial.
+    assert_eq!(
+        fields,
+        [
+            "1,2,3,200,201",
+            "0x40,0x40,0x40,0xd0,0xe0",
+            "1,0,4,300,3",
+            "198.51.100.0"
+        ]
+    );
+}
+
+#[test]
+fn update_that_only_withdraws() {
+    if !wireshark_available() {
+        return;
+    }
+    let update = Update {
+        // Not a /24 followed by the default route: `18 c6 33 64 00` also reads
+        // as a 4-octet path identifier and 0.0.0.0/0, and Wireshark's ADD-PATH
+        // heuristic picks that reading when there is no OPEN to go by.
+        withdrawn: vec![prefix(198, 51, 100, 0, 24), prefix(203, 0, 113, 128, 25)],
+        ..Update::default()
+    };
+    let fields = dissect(
+        "update_withdraw",
+        &encode_update(&update, UpdateContext::new(true)),
+        &[
+            "bgp.length",
+            "bgp.update.withdrawn_routes.length",
+            "bgp.withdrawn_prefix",
+            "bgp.prefix_length",
+            "bgp.update.path_attributes.length",
+        ],
+    );
+    assert_eq!(
+        fields,
+        ["32", "9", "198.51.100.0,203.0.113.128", "24,25", "0"]
+    );
 }

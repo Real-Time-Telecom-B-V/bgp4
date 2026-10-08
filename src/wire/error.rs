@@ -4,7 +4,7 @@ use std::fmt;
 
 use bytes::Bytes;
 
-use super::notification::{ErrorCode, MessageHeaderError, Notification, OpenError};
+use super::notification::{ErrorCode, MessageHeaderError, Notification, OpenError, UpdateError};
 
 /// Why a message could not be decoded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,21 +42,41 @@ pub enum DecodeErrorReason {
     },
     /// An OPEN whose optional parameters or capabilities cannot be parsed.
     MalformedOpen,
+    /// An UPDATE whose Withdrawn Routes Length or Total Path Attribute Length
+    /// does not fit the message, so its fields cannot be told apart.
+    MalformedAttributeList,
+    /// An UPDATE with a prefix that cannot be parsed.
+    InvalidNetworkField,
+    /// An UPDATE with a well-known attribute this crate does not recognise.
+    UnrecognizedWellKnownAttribute {
+        /// The attribute type code.
+        type_code: u8,
+    },
 }
 
 /// A message that could not be decoded, and what to tell the peer about it.
 ///
 /// The codec does not log: it has no notion of which peer the bytes came from.
 /// The caller logs this error together with the peer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DecodeError {
     reason: DecodeErrorReason,
     offset: usize,
+    data: Bytes,
 }
 
 impl DecodeError {
     pub(crate) fn new(reason: DecodeErrorReason, offset: usize) -> Self {
-        Self { reason, offset }
+        Self::with_data(reason, offset, Bytes::new())
+    }
+
+    /// An error whose NOTIFICATION quotes part of the offending message.
+    pub(crate) fn with_data(reason: DecodeErrorReason, offset: usize, data: Bytes) -> Self {
+        Self {
+            reason,
+            offset,
+            data,
+        }
     }
 
     /// Why decoding failed.
@@ -105,6 +125,19 @@ impl DecodeError {
             DecodeErrorReason::MalformedOpen => {
                 Notification::new(ErrorCode::Open(OpenError::Unspecific), Bytes::new())
             }
+            DecodeErrorReason::MalformedAttributeList => Notification::new(
+                ErrorCode::Update(UpdateError::MalformedAttributeList),
+                Bytes::new(),
+            ),
+            DecodeErrorReason::InvalidNetworkField => Notification::new(
+                ErrorCode::Update(UpdateError::InvalidNetworkField),
+                Bytes::new(),
+            ),
+            // RFC 4271 section 6.3: the data is the unrecognised attribute.
+            DecodeErrorReason::UnrecognizedWellKnownAttribute { .. } => Notification::new(
+                ErrorCode::Update(UpdateError::UnrecognizedWellKnownAttribute),
+                self.data.clone(),
+            ),
         }
     }
 }
@@ -132,6 +165,13 @@ impl fmt::Display for DecodeError {
                 write!(formatter, "unsupported optional parameter {parameter_type}")?
             }
             DecodeErrorReason::MalformedOpen => write!(formatter, "malformed OPEN")?,
+            DecodeErrorReason::MalformedAttributeList => {
+                write!(formatter, "malformed attribute list")?
+            }
+            DecodeErrorReason::InvalidNetworkField => write!(formatter, "invalid network field")?,
+            DecodeErrorReason::UnrecognizedWellKnownAttribute { type_code } => {
+                write!(formatter, "unrecognized well-known attribute {type_code}")?
+            }
         }
         write!(formatter, " at offset {}", self.offset)
     }
@@ -172,6 +212,33 @@ pub enum EncodeError {
         /// The length of the rejected value.
         length: usize,
     },
+    /// An AS path segment without AS numbers.
+    EmptyAsPathSegment,
+    /// An AS_SET or AS_CONFED_SET of more than 255 AS numbers.
+    AsSetTooLong {
+        /// The number of AS numbers in the set.
+        length: usize,
+    },
+    /// An AS number above 65535 on a session without 4-octet AS numbers.
+    AutonomousSystemNeedsFourOctets {
+        /// The AS number that does not fit.
+        autonomous_system: u32,
+    },
+    /// An UPDATE that announces a route without a mandatory attribute.
+    MissingMandatoryAttribute {
+        /// The type code of the absent attribute.
+        type_code: u8,
+    },
+    /// An unknown attribute with a type code the crate interprets itself.
+    AttributeTypeIsInterpreted {
+        /// The type code.
+        type_code: u8,
+    },
+    /// The same attribute type more than once.
+    DuplicateAttribute {
+        /// The type code.
+        type_code: u8,
+    },
 }
 
 impl fmt::Display for EncodeError {
@@ -196,6 +263,25 @@ impl fmt::Display for EncodeError {
                 formatter,
                 "capability {code} value of {length} octets exceeds 255"
             ),
+            EncodeError::EmptyAsPathSegment => write!(formatter, "AS path segment is empty"),
+            EncodeError::AsSetTooLong { length } => {
+                write!(formatter, "AS set of {length} AS numbers exceeds 255")
+            }
+            EncodeError::AutonomousSystemNeedsFourOctets { autonomous_system } => write!(
+                formatter,
+                "AS {autonomous_system} needs a session with 4-octet AS numbers"
+            ),
+            EncodeError::MissingMandatoryAttribute { type_code } => write!(
+                formatter,
+                "announcement without mandatory attribute {type_code}"
+            ),
+            EncodeError::AttributeTypeIsInterpreted { type_code } => write!(
+                formatter,
+                "attribute {type_code} cannot be given as an unknown attribute"
+            ),
+            EncodeError::DuplicateAttribute { type_code } => {
+                write!(formatter, "attribute {type_code} appears more than once")
+            }
         }
     }
 }

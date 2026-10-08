@@ -22,3 +22,10 @@ bytes = "1"
 correctness = { level = "deny", priority = -1 }
 await_holding_lock = "deny"
 await_holding_refcell_ref = "deny"
+
+[dev-dependencies]
+criterion = "0.8"
+
+[[bench]]
+name = "update"
+harness = false

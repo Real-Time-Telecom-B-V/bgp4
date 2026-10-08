@@ -3,7 +3,8 @@
 use bytes::{BufMut, Bytes, BytesMut};
 
 use super::attribute::{
-    AttributeError, AttributeErrorAction, PathAttributes, AS_PATH, NEXT_HOP, ORIGIN,
+    AttributeError, AttributeErrorAction, PathAttributes, AS_PATH, LOCAL_PREFERENCE, NEXT_HOP,
+    ORIGIN,
 };
 use super::error::{DecodeError, DecodeErrorReason, EncodeError};
 use super::header::{Header, MessageType, HEADER_LENGTH};
@@ -11,7 +12,18 @@ use super::nlri::Ipv4Prefix;
 use super::notification::UpdateError;
 use super::reader::Reader;
 
-/// What was negotiated on the session and changes how an UPDATE is read and
+/// What kind of peer is on the other end of the session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SessionType {
+    /// The peer is in the same AS.
+    Internal,
+    /// The peer is in another member AS of the same confederation (RFC 5065).
+    ConfederationExternal,
+    /// The peer is in another AS, outside any confederation of ours.
+    External,
+}
+
+/// What is known about the session and changes how an UPDATE is read and
 /// written.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -19,13 +31,17 @@ pub struct UpdateContext {
     /// Both speakers announced the 4-octet AS capability (RFC 6793), so AS
     /// numbers in AS_PATH and AGGREGATOR are 4 octets wide.
     pub four_octet_autonomous_systems: bool,
+    /// The kind of peer. Several attributes are valid only toward some kinds.
+    pub session_type: SessionType,
 }
 
 impl UpdateContext {
-    /// A context for a session with or without 4-octet AS numbers.
-    pub const fn new(four_octet_autonomous_systems: bool) -> Self {
+    /// A context for a session of the given kind, with or without 4-octet AS
+    /// numbers.
+    pub const fn new(four_octet_autonomous_systems: bool, session_type: SessionType) -> Self {
         Self {
             four_octet_autonomous_systems,
+            session_type,
         }
     }
 }
@@ -101,6 +117,12 @@ impl Update {
                 (ORIGIN, attributes.origin.is_none()),
                 (AS_PATH, attributes.as_path.is_none()),
                 (NEXT_HOP, attributes.next_hop.is_none()),
+                // RFC 4271 section 5.1.5: mandatory toward internal peers.
+                (
+                    LOCAL_PREFERENCE,
+                    context.session_type == SessionType::Internal
+                        && attributes.local_preference.is_none(),
+                ),
             ];
             for (type_code, absent) in missing {
                 if absent {
@@ -133,7 +155,9 @@ impl Update {
     /// Append the whole message, header included, to `buffer`.
     ///
     /// Refuses to write an UPDATE that a receiver would have to repair: one
-    /// that announces a route without ORIGIN, AS_PATH and NEXT_HOP. Nothing
+    /// that announces a route without ORIGIN, AS_PATH and NEXT_HOP (and
+    /// LOCAL_PREF toward an internal peer), or that carries toward an external
+    /// peer an attribute that has no meaning there. Nothing
     /// is written when the message cannot be encoded or does not fit.
     pub fn encode(&self, context: UpdateContext, buffer: &mut BytesMut) -> Result<(), EncodeError> {
         if !self.announced.is_empty() {
@@ -141,6 +165,11 @@ impl Update {
                 (ORIGIN, self.attributes.origin.is_none()),
                 (AS_PATH, self.attributes.as_path.is_none()),
                 (NEXT_HOP, self.attributes.next_hop.is_none()),
+                (
+                    LOCAL_PREFERENCE,
+                    context.session_type == SessionType::Internal
+                        && self.attributes.local_preference.is_none(),
+                ),
             ];
             for (type_code, absent) in mandatory {
                 if absent {
@@ -183,11 +212,13 @@ mod tests {
 
     use super::*;
     use crate::wire::{
-        Aggregator, AsPath, ErrorCode, Origin, UnknownAttribute, MAXIMUM_MESSAGE_LENGTH,
+        Aggregator, AsPath, Community, ErrorCode, ExtendedCommunity, LargeCommunity, Origin,
+        UnknownAttribute, MAXIMUM_MESSAGE_LENGTH,
     };
 
-    const FOUR_OCTET: UpdateContext = UpdateContext::new(true);
-    const TWO_OCTET: UpdateContext = UpdateContext::new(false);
+    const FOUR_OCTET: UpdateContext = UpdateContext::new(true, SessionType::External);
+    const TWO_OCTET: UpdateContext = UpdateContext::new(false, SessionType::External);
+    const INTERNAL: UpdateContext = UpdateContext::new(false, SessionType::Internal);
 
     const ORIGIN_IGP: &[u8] = &[0x40, 1, 1, 0];
     /// AS_SEQUENCE of 64496, 2 octets wide.
@@ -212,13 +243,21 @@ mod tests {
     }
 
     fn decode(attributes: &[&[u8]]) -> DecodedUpdate {
-        Update::decode(body(&[], attributes, NLRI), TWO_OCTET).expect("no session reset")
+        decode_on(TWO_OCTET, attributes)
+    }
+
+    fn decode_on(context: UpdateContext, attributes: &[&[u8]]) -> DecodedUpdate {
+        Update::decode(body(&[], attributes, NLRI), context).expect("no session reset")
     }
 
     /// Asserts the message was turned into a withdrawal of the one route and
     /// returns the errors.
     fn withdrawn(attributes: &[&[u8]]) -> Vec<AttributeError> {
-        let decoded = decode(attributes);
+        withdrawn_on(TWO_OCTET, attributes)
+    }
+
+    fn withdrawn_on(context: UpdateContext, attributes: &[&[u8]]) -> Vec<AttributeError> {
+        let decoded = decode_on(context, attributes);
         assert_eq!(decoded.update.withdrawn, [prefix()]);
         assert!(decoded.update.announced.is_empty());
         assert_eq!(decoded.update.attributes, PathAttributes::default());
@@ -254,7 +293,7 @@ mod tests {
                 ],
                 NLRI,
             ),
-            TWO_OCTET,
+            INTERNAL,
         )
         .expect("valid");
         assert_eq!(decoded.errors, []);
@@ -363,7 +402,6 @@ mod tests {
         for (attribute, type_code) in [
             (&[0x40, 3, 3, 192, 0, 2][..], 3),
             (&[0x80, 4, 5, 0, 0, 0, 0, 1][..], 4),
-            (&[0x40, 5, 0][..], 5),
         ] {
             // The malformed attribute, then a good NEXT_HOP unless NEXT_HOP is
             // the one under test, which would make it a repeated attribute.
@@ -382,6 +420,228 @@ mod tests {
                 "type {type_code}"
             );
         }
+    }
+
+    #[test]
+    fn wrong_length_of_local_pref_from_an_internal_peer() {
+        assert_eq!(
+            withdrawn_on(
+                INTERNAL,
+                &[ORIGIN_IGP, AS_PATH_64496, &[0x40, 5, 0], NEXT_HOP_192_0_2_1]
+            ),
+            [withdraw_error(
+                Some(5),
+                34,
+                UpdateError::AttributeLengthError
+            )]
+        );
+    }
+
+    #[test]
+    fn local_pref_is_mandatory_from_an_internal_peer_only() {
+        let attributes: &[&[u8]] = &[ORIGIN_IGP, AS_PATH_64496, NEXT_HOP_192_0_2_1];
+        let errors = withdrawn_on(INTERNAL, attributes);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].type_code, Some(5));
+        assert_eq!(errors[0].subcode, UpdateError::MissingWellKnownAttribute);
+
+        for session_type in [SessionType::External, SessionType::ConfederationExternal] {
+            let decoded = decode_on(UpdateContext::new(false, session_type), attributes);
+            assert_eq!(decoded.errors, [], "{session_type:?}");
+            assert_eq!(decoded.update.announced, [prefix()]);
+        }
+    }
+
+    const LOCAL_PREF_200: &[u8] = &[0x40, 5, 4, 0, 0, 0, 200];
+    const ORIGINATOR_ID: &[u8] = &[0x80, 9, 4, 192, 0, 2, 7];
+    const CLUSTER_LIST: &[u8] = &[0x80, 10, 8, 192, 0, 2, 8, 192, 0, 2, 9];
+
+    #[test]
+    fn internal_only_attributes_are_discarded_from_an_external_peer() {
+        // Well formed or not makes no difference there (RFC 7606 section 7.5,
+        // 7.9, 7.10).
+        for attributes in [
+            [LOCAL_PREF_200, ORIGINATOR_ID, CLUSTER_LIST],
+            [
+                &[0x40, 5, 1, 0][..],
+                &[0x80, 9, 0][..],
+                &[0x80, 10, 3, 1, 2, 3][..],
+            ],
+        ] {
+            let mut all = vec![ORIGIN_IGP, AS_PATH_64496, NEXT_HOP_192_0_2_1];
+            all.extend_from_slice(&attributes);
+            let decoded = decode(&all);
+            assert_eq!(decoded.update.announced, [prefix()]);
+            assert_eq!(decoded.update.attributes.local_preference, None);
+            assert_eq!(decoded.update.attributes.originator_id, None);
+            assert!(decoded.update.attributes.cluster_list.is_empty());
+            let discarded: Vec<(Option<u8>, AttributeErrorAction)> = decoded
+                .errors
+                .iter()
+                .map(|error| (error.type_code, error.action))
+                .collect();
+            assert_eq!(
+                discarded,
+                [
+                    (Some(5), AttributeErrorAction::AttributeDiscard),
+                    (Some(9), AttributeErrorAction::AttributeDiscard),
+                    (Some(10), AttributeErrorAction::AttributeDiscard),
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn reflection_attributes_from_an_internal_peer() {
+        let decoded = decode_on(
+            INTERNAL,
+            &[
+                ORIGIN_IGP,
+                AS_PATH_64496,
+                NEXT_HOP_192_0_2_1,
+                LOCAL_PREF_200,
+                ORIGINATOR_ID,
+                CLUSTER_LIST,
+            ],
+        );
+        assert_eq!(decoded.errors, []);
+        assert_eq!(
+            decoded.update.attributes.originator_id,
+            Some(Ipv4Addr::new(192, 0, 2, 7))
+        );
+        assert_eq!(
+            decoded.update.attributes.cluster_list,
+            [Ipv4Addr::new(192, 0, 2, 8), Ipv4Addr::new(192, 0, 2, 9)]
+        );
+    }
+
+    #[test]
+    fn malformed_reflection_attributes_from_an_internal_peer_are_treat_as_withdraw() {
+        for (attribute, type_code, subcode) in [
+            (
+                &[0x80, 9, 3, 1, 2, 3][..],
+                9,
+                UpdateError::AttributeLengthError,
+            ),
+            (&[0x80, 10, 0][..], 10, UpdateError::OptionalAttributeError),
+            (
+                &[0x80, 10, 5, 1, 2, 3, 4, 5][..],
+                10,
+                UpdateError::OptionalAttributeError,
+            ),
+        ] {
+            assert_eq!(
+                withdrawn_on(
+                    INTERNAL,
+                    &[
+                        ORIGIN_IGP,
+                        AS_PATH_64496,
+                        NEXT_HOP_192_0_2_1,
+                        LOCAL_PREF_200,
+                        attribute
+                    ]
+                ),
+                [withdraw_error(Some(type_code), 48, subcode)],
+                "type {type_code}"
+            );
+        }
+    }
+
+    #[test]
+    fn communities_of_all_three_kinds_and_only_to_customer() {
+        let decoded = decode(&[
+            ORIGIN_IGP,
+            AS_PATH_64496,
+            NEXT_HOP_192_0_2_1,
+            // 64496:100 and NO_EXPORT
+            &[0xc0, 8, 8, 0xfb, 0xf0, 0, 100, 0xff, 0xff, 0xff, 0x01],
+            // A route target, 2-octet AS 64496, value 1.
+            &[0xc0, 16, 8, 0, 2, 0xfb, 0xf0, 0, 0, 0, 1],
+            // 65550:1:2, twice.
+            &[
+                0xc0, 32, 24, 0, 1, 0, 14, 0, 0, 0, 1, 0, 0, 0, 2, 0, 1, 0, 14, 0, 0, 0, 1, 0, 0,
+                0, 2,
+            ],
+            // Only-to-Customer, marked by AS 64496.
+            &[0xc0, 35, 4, 0, 0, 0xfb, 0xf0],
+        ]);
+        assert_eq!(decoded.errors, []);
+        let attributes = decoded.update.attributes;
+        assert_eq!(
+            attributes.communities,
+            [Community::new(64496, 100), Community::NO_EXPORT]
+        );
+        assert_eq!(
+            attributes.extended_communities,
+            [ExtendedCommunity([0, 2, 0xfb, 0xf0, 0, 0, 0, 1])]
+        );
+        // RFC 8092 section 5: the duplicate is removed.
+        assert_eq!(
+            attributes.large_communities,
+            [LargeCommunity {
+                global_administrator: 65550,
+                local_data_1: 1,
+                local_data_2: 2
+            }]
+        );
+        assert_eq!(attributes.only_to_customer, Some(64496));
+        assert!(attributes.unknown.is_empty());
+    }
+
+    #[test]
+    fn malformed_community_attributes_are_treat_as_withdraw() {
+        for (attribute, type_code, subcode) in [
+            (&[0xc0, 8, 0][..], 8, UpdateError::OptionalAttributeError),
+            (
+                &[0xc0, 8, 3, 1, 2, 3][..],
+                8,
+                UpdateError::OptionalAttributeError,
+            ),
+            (&[0xc0, 16, 0][..], 16, UpdateError::OptionalAttributeError),
+            (
+                &[0xc0, 16, 7, 1, 2, 3, 4, 5, 6, 7][..],
+                16,
+                UpdateError::OptionalAttributeError,
+            ),
+            (&[0xc0, 32, 0][..], 32, UpdateError::OptionalAttributeError),
+            (
+                &[0xc0, 32, 11, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11][..],
+                32,
+                UpdateError::OptionalAttributeError,
+            ),
+            (
+                &[0xc0, 35, 3, 1, 2, 3][..],
+                35,
+                UpdateError::AttributeLengthError,
+            ),
+            (&[0xc0, 35, 0][..], 35, UpdateError::AttributeLengthError),
+        ] {
+            assert_eq!(
+                withdrawn(&[ORIGIN_IGP, AS_PATH_64496, NEXT_HOP_192_0_2_1, attribute]),
+                [withdraw_error(Some(type_code), 41, subcode)],
+                "type {type_code}"
+            );
+        }
+    }
+
+    /// AS_CONFED_SEQUENCE of 64500, then AS_SEQUENCE of 64496.
+    const AS_PATH_WITH_CONFEDERATION: &[u8] = &[0x40, 2, 8, 3, 1, 0xfb, 0xf4, 2, 1, 0xfb, 0xf0];
+
+    #[test]
+    fn confederation_segments_are_malformed_from_an_external_peer_only() {
+        let attributes: &[&[u8]] = &[ORIGIN_IGP, AS_PATH_WITH_CONFEDERATION, NEXT_HOP_192_0_2_1];
+        assert_eq!(
+            withdrawn(attributes),
+            [withdraw_error(Some(2), 27, UpdateError::MalformedAsPath)]
+        );
+        let confederation = UpdateContext::new(false, SessionType::ConfederationExternal);
+        let decoded = decode_on(confederation, attributes);
+        assert_eq!(decoded.errors, []);
+        assert!(decoded
+            .update
+            .attributes
+            .as_path
+            .is_some_and(|path| path.has_confederation_segments()));
     }
 
     #[test]
@@ -606,9 +866,49 @@ mod tests {
     }
 
     fn encode(update: &Update) -> Result<Vec<u8>, EncodeError> {
+        encode_on(TWO_OCTET, update)
+    }
+
+    fn encode_on(context: UpdateContext, update: &Update) -> Result<Vec<u8>, EncodeError> {
         let mut buffer = BytesMut::new();
-        update.encode(TWO_OCTET, &mut buffer)?;
+        update.encode(context, &mut buffer)?;
         Ok(buffer.to_vec())
+    }
+
+    #[test]
+    fn internal_only_attributes_are_refused_toward_an_external_peer() {
+        let mut with_local_pref = announcement();
+        with_local_pref.attributes.local_preference = Some(100);
+        let mut with_originator = announcement();
+        with_originator.attributes.originator_id = Some(Ipv4Addr::new(192, 0, 2, 7));
+        let mut with_cluster_list = announcement();
+        with_cluster_list.attributes.cluster_list = vec![Ipv4Addr::new(192, 0, 2, 8)];
+        for (update, type_code) in [
+            (with_local_pref, 5),
+            (with_originator, 9),
+            (with_cluster_list, 10),
+        ] {
+            assert_eq!(
+                encode(&update),
+                Err(EncodeError::AttributeNotAllowed { type_code })
+            );
+        }
+    }
+
+    #[test]
+    fn an_announcement_toward_an_internal_peer_needs_local_pref() {
+        let mut update = announcement();
+        assert_eq!(
+            encode_on(INTERNAL, &update),
+            Err(EncodeError::MissingMandatoryAttribute { type_code: 5 })
+        );
+        update.attributes.local_preference = Some(100);
+        assert!(encode_on(INTERNAL, &update).is_ok());
+        // Toward another member AS of the confederation it is allowed but
+        // not required.
+        let confederation = UpdateContext::new(false, SessionType::ConfederationExternal);
+        assert!(encode_on(confederation, &update).is_ok());
+        assert!(encode_on(confederation, &announcement()).is_ok());
     }
 
     #[test]
@@ -664,9 +964,9 @@ mod tests {
             .attributes
             .unknown
             .push(UnknownAttribute::new(100, Bytes::new()));
-        let wire = encode(&update).expect("valid");
+        let wire = encode_on(INTERNAL, &update).expect("valid");
         let decoded =
-            Update::decode(Bytes::copy_from_slice(&wire[HEADER_LENGTH..]), TWO_OCTET).expect("ok");
+            Update::decode(Bytes::copy_from_slice(&wire[HEADER_LENGTH..]), INTERNAL).expect("ok");
         let order: Vec<u8> = decoded
             .update
             .attributes

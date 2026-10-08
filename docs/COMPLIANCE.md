@@ -15,18 +15,18 @@ Status values: **Done**, **Partial** (see notes), **Planned**, **Not planned**.
 | [5492](https://www.rfc-editor.org/rfc/rfc5492) | Capabilities Advertisement with BGP-4 | Partial | Capabilities in the OPEN codec; negotiation belongs to the session, to come |
 | [6793](https://www.rfc-editor.org/rfc/rfc6793) | BGP Support for Four-Octet Autonomous System (AS) Number Space | Partial | Capability, AS_TRANS in OPEN, 4-octet AS_PATH and AGGREGATOR. AS4_PATH and AS4_AGGREGATOR to come |
 | [4760](https://www.rfc-editor.org/rfc/rfc4760) | Multiprotocol Extensions for BGP-4 | Planned | IPv6 unicast only |
-| [5065](https://www.rfc-editor.org/rfc/rfc5065) | Autonomous System Confederations for BGP | Partial | Confederation segments in the AS_PATH codec; session behaviour to come |
+| [5065](https://www.rfc-editor.org/rfc/rfc5065) | Autonomous System Confederations for BGP | Partial | Confederation segments in AS_PATH, rejected from external peers. Session behaviour to come |
 | [7705](https://www.rfc-editor.org/rfc/rfc7705) | Autonomous System Migration Mechanisms and Their Effects on the BGP AS_PATH Attribute | Planned | Per-session local AS, no-prepend, replace-AS |
-| [7606](https://www.rfc-editor.org/rfc/rfc7606) | Revised Error Handling for BGP UPDATE Messages | Partial | Base attributes and framing. Rules that depend on the session type and the multiprotocol attributes to come |
+| [7606](https://www.rfc-editor.org/rfc/rfc7606) | Revised Error Handling for BGP UPDATE Messages | Partial | All attributes the crate interprets, including the session-dependent rules. Multiprotocol attributes to come |
 | [6286](https://www.rfc-editor.org/rfc/rfc6286) | Autonomous-System-Wide Unique BGP Identifier for BGP-4 | Partial | Zero identifier rejected in the codec; the AS-wide uniqueness rule belongs to the session |
 | [6608](https://www.rfc-editor.org/rfc/rfc6608) | Subcodes for BGP Finite State Machine Error | Partial | Subcodes in the codec; the state machine that raises them is to come |
 | [4486](https://www.rfc-editor.org/rfc/rfc4486) | Subcodes for BGP Cease Notification Message | Partial | Subcodes in the codec; sessions that send them are to come |
 | [9003](https://www.rfc-editor.org/rfc/rfc9003) | Extended BGP Administrative Shutdown Communication | Partial | Encode and decode of the communication; sessions to come |
-| [1997](https://www.rfc-editor.org/rfc/rfc1997) | BGP Communities Attribute | Planned | |
-| [8092](https://www.rfc-editor.org/rfc/rfc8092) | BGP Large Communities Attribute | Planned | |
-| [4360](https://www.rfc-editor.org/rfc/rfc4360) | BGP Extended Communities Attribute | Planned | Carried, not interpreted |
-| [8326](https://www.rfc-editor.org/rfc/rfc8326) | Graceful BGP Session Shutdown | Planned | |
-| [7999](https://www.rfc-editor.org/rfc/rfc7999) | BLACKHOLE Community | Planned | |
+| [1997](https://www.rfc-editor.org/rfc/rfc1997) | BGP Communities Attribute | Partial | Attribute codec and well-known values. Honouring NO_EXPORT and NO_ADVERTISE belongs to policy, to come |
+| [8092](https://www.rfc-editor.org/rfc/rfc8092) | BGP Large Communities Attribute | Partial | Attribute codec; matching in policy to come |
+| [4360](https://www.rfc-editor.org/rfc/rfc4360) | BGP Extended Communities Attribute | Done | Carried, not interpreted |
+| [8326](https://www.rfc-editor.org/rfc/rfc8326) | Graceful BGP Session Shutdown | Partial | Community value; the shutdown procedure belongs to the speaker, to come |
+| [7999](https://www.rfc-editor.org/rfc/rfc7999) | BLACKHOLE Community | Partial | Community value; the origination bound belongs to policy, to come |
 | [8212](https://www.rfc-editor.org/rfc/rfc8212) | Default External BGP (EBGP) Route Propagation Behavior without Policies | Planned | |
 | [2385](https://www.rfc-editor.org/rfc/rfc2385) | Protection of BGP Sessions via the TCP MD5 Signature Option | Planned | Obsoleted by RFC 5925, still what most peers require |
 | [5082](https://www.rfc-editor.org/rfc/rfc5082) | The Generalized TTL Security Mechanism (GTSM) | Planned | |
@@ -36,8 +36,8 @@ Status values: **Done**, **Partial** (see notes), **Planned**, **Not planned**.
 | RFC | Title | Status | Notes |
 | --- | --- | --- | --- |
 | [2918](https://www.rfc-editor.org/rfc/rfc2918) | Route Refresh Capability for BGP-4 | Planned | |
-| [4456](https://www.rfc-editor.org/rfc/rfc4456) | BGP Route Reflection: An Alternative to Full Mesh Internal BGP (IBGP) | Planned | Attributes and loop checks; no built-in reflector |
-| [9234](https://www.rfc-editor.org/rfc/rfc9234) | Route Leak Prevention and Detection Using Roles in UPDATE and OPEN Messages | Planned | |
+| [4456](https://www.rfc-editor.org/rfc/rfc4456) | BGP Route Reflection: An Alternative to Full Mesh Internal BGP (IBGP) | Partial | ORIGINATOR_ID and CLUSTER_LIST codec. Loop checks to come; no built-in reflector |
+| [9234](https://www.rfc-editor.org/rfc/rfc9234) | Route Leak Prevention and Detection Using Roles in UPDATE and OPEN Messages | Partial | Only-to-Customer attribute codec. Role capability and the leak checks to come |
 | [4724](https://www.rfc-editor.org/rfc/rfc4724) | Graceful Restart Mechanism for BGP | Planned | |
 | [8538](https://www.rfc-editor.org/rfc/rfc8538) | Notification Message Support for BGP Graceful Restart | Planned | |
 | [5880](https://www.rfc-editor.org/rfc/rfc5880) | Bidirectional Forwarding Detection (BFD) | Planned | Asynchronous mode, no echo, no authentication |

@@ -6,10 +6,11 @@ use std::net::Ipv4Addr;
 use bytes::{BufMut, Bytes, BytesMut};
 
 use super::as_path::{put_autonomous_system, AsPath};
+use super::community::{Community, ExtendedCommunity, LargeCommunity};
 use super::error::{DecodeError, DecodeErrorReason, EncodeError};
 use super::notification::UpdateError;
 use super::reader::Reader;
-use super::update::UpdateContext;
+use super::update::{SessionType, UpdateContext};
 
 const FLAG_OPTIONAL: u8 = 0x80;
 const FLAG_TRANSITIVE: u8 = 0x40;
@@ -20,17 +21,25 @@ pub(crate) const ORIGIN: u8 = 1;
 pub(crate) const AS_PATH: u8 = 2;
 pub(crate) const NEXT_HOP: u8 = 3;
 const MULTI_EXIT_DISCRIMINATOR: u8 = 4;
-const LOCAL_PREFERENCE: u8 = 5;
+pub(crate) const LOCAL_PREFERENCE: u8 = 5;
 const ATOMIC_AGGREGATE: u8 = 6;
 const AGGREGATOR: u8 = 7;
+const COMMUNITIES: u8 = 8;
+const ORIGINATOR_ID: u8 = 9;
+const CLUSTER_LIST: u8 = 10;
+const EXTENDED_COMMUNITIES: u8 = 16;
+const LARGE_COMMUNITY: u8 = 32;
+const ONLY_TO_CUSTOMER: u8 = 35;
 
 /// The Optional and Transitive bits an attribute this crate interprets must
 /// carry, or `None` for a type it does not interpret.
 fn expected_flags(type_code: u8) -> Option<u8> {
     match type_code {
         ORIGIN | AS_PATH | NEXT_HOP | LOCAL_PREFERENCE | ATOMIC_AGGREGATE => Some(FLAG_TRANSITIVE),
-        MULTI_EXIT_DISCRIMINATOR => Some(FLAG_OPTIONAL),
-        AGGREGATOR => Some(FLAG_OPTIONAL | FLAG_TRANSITIVE),
+        MULTI_EXIT_DISCRIMINATOR | ORIGINATOR_ID | CLUSTER_LIST => Some(FLAG_OPTIONAL),
+        AGGREGATOR | COMMUNITIES | EXTENDED_COMMUNITIES | LARGE_COMMUNITY | ONLY_TO_CUSTOMER => {
+            Some(FLAG_OPTIONAL | FLAG_TRANSITIVE)
+        }
         _ => None,
     }
 }
@@ -143,6 +152,19 @@ pub struct PathAttributes {
     pub atomic_aggregate: bool,
     /// AGGREGATOR.
     pub aggregator: Option<Aggregator>,
+    /// COMMUNITIES (RFC 1997). Empty when the attribute is absent.
+    pub communities: Vec<Community>,
+    /// ORIGINATOR_ID (RFC 4456). Only on internal sessions.
+    pub originator_id: Option<Ipv4Addr>,
+    /// CLUSTER_LIST (RFC 4456), nearest reflector first. Empty when the
+    /// attribute is absent. Only on internal sessions.
+    pub cluster_list: Vec<Ipv4Addr>,
+    /// EXTENDED COMMUNITIES (RFC 4360). Empty when the attribute is absent.
+    pub extended_communities: Vec<ExtendedCommunity>,
+    /// LARGE_COMMUNITY (RFC 8092). Empty when the attribute is absent.
+    pub large_communities: Vec<LargeCommunity>,
+    /// Only-to-Customer (RFC 9234): the AS that marked the route.
+    pub only_to_customer: Option<u32>,
     /// Optional transitive attributes the crate does not interpret.
     pub unknown: Vec<UnknownAttribute>,
 }
@@ -240,6 +262,21 @@ impl PathAttributes {
                 continue;
             };
 
+            // RFC 7606 sections 7.5, 7.9 and 7.10: these attributes have no
+            // meaning on an external session and are discarded there, whatever
+            // they look like.
+            if context.session_type == SessionType::External
+                && matches!(type_code, LOCAL_PREFERENCE | ORIGINATOR_ID | CLUSTER_LIST)
+            {
+                errors.push(AttributeError {
+                    type_code: Some(type_code),
+                    offset,
+                    action: AttributeErrorAction::AttributeDiscard,
+                    subcode: UpdateError::Unspecific,
+                });
+                continue;
+            }
+
             // RFC 7606 section 3.c.
             if flags & (FLAG_OPTIONAL | FLAG_TRANSITIVE) != expected {
                 withdraw(errors, Some(type_code), UpdateError::AttributeFlagsError);
@@ -261,22 +298,90 @@ impl PathAttributes {
                     }
                 },
                 AS_PATH => match AsPath::decode(value, context.four_octet_autonomous_systems) {
+                    // RFC 5065 section 5: confederation segments from a peer
+                    // outside the confederation make the path malformed.
+                    Some(as_path)
+                        if context.session_type == SessionType::External
+                            && as_path.has_confederation_segments() =>
+                    {
+                        withdraw(errors, Some(type_code), UpdateError::MalformedAsPath);
+                    }
                     Some(as_path) => attributes.as_path = Some(as_path),
                     None => {
                         withdraw(errors, Some(type_code), UpdateError::MalformedAsPath);
                     }
                 },
-                NEXT_HOP | MULTI_EXIT_DISCRIMINATOR | LOCAL_PREFERENCE => {
-                    match (value.len(), value_reader.u32()) {
-                        (4, Some(number)) => match type_code {
-                            NEXT_HOP => attributes.next_hop = Some(Ipv4Addr::from(number)),
-                            MULTI_EXIT_DISCRIMINATOR => {
-                                attributes.multi_exit_discriminator = Some(number)
+                NEXT_HOP
+                | MULTI_EXIT_DISCRIMINATOR
+                | LOCAL_PREFERENCE
+                | ORIGINATOR_ID
+                | ONLY_TO_CUSTOMER => match (value.len(), value_reader.u32()) {
+                    (4, Some(number)) => match type_code {
+                        NEXT_HOP => attributes.next_hop = Some(Ipv4Addr::from(number)),
+                        MULTI_EXIT_DISCRIMINATOR => {
+                            attributes.multi_exit_discriminator = Some(number)
+                        }
+                        LOCAL_PREFERENCE => attributes.local_preference = Some(number),
+                        ORIGINATOR_ID => attributes.originator_id = Some(Ipv4Addr::from(number)),
+                        _ => attributes.only_to_customer = Some(number),
+                    },
+                    _ => {
+                        withdraw(errors, Some(type_code), UpdateError::AttributeLengthError);
+                    }
+                },
+                // Lists of fixed-size entries. An empty list or a length that is
+                // not a multiple of the entry size is treat-as-withdraw
+                // (RFC 7606 sections 7.8, 7.10, 7.14 and RFC 8092 section 5).
+                COMMUNITIES | CLUSTER_LIST | EXTENDED_COMMUNITIES | LARGE_COMMUNITY => {
+                    let entry_length = match type_code {
+                        EXTENDED_COMMUNITIES => 8,
+                        LARGE_COMMUNITY => 12,
+                        _ => 4,
+                    };
+                    if value.is_empty() || !value.len().is_multiple_of(entry_length) {
+                        withdraw(errors, Some(type_code), UpdateError::OptionalAttributeError);
+                        continue;
+                    }
+                    for entry in value.chunks_exact(entry_length) {
+                        match type_code {
+                            COMMUNITIES => {
+                                if let Some(number) = be_u32(entry) {
+                                    attributes.communities.push(Community(number));
+                                }
                             }
-                            _ => attributes.local_preference = Some(number),
-                        },
-                        _ => {
-                            withdraw(errors, Some(type_code), UpdateError::AttributeLengthError);
+                            CLUSTER_LIST => {
+                                if let Some(number) = be_u32(entry) {
+                                    attributes.cluster_list.push(Ipv4Addr::from(number));
+                                }
+                            }
+                            EXTENDED_COMMUNITIES => {
+                                if let Ok(octets) = <[u8; 8]>::try_from(entry) {
+                                    attributes
+                                        .extended_communities
+                                        .push(ExtendedCommunity(octets));
+                                }
+                            }
+                            _ => {
+                                if let (
+                                    Some(global_administrator),
+                                    Some(local_data_1),
+                                    Some(local_data_2),
+                                ) = (
+                                    be_u32(&entry[..4]),
+                                    be_u32(&entry[4..8]),
+                                    be_u32(&entry[8..]),
+                                ) {
+                                    let community = LargeCommunity {
+                                        global_administrator,
+                                        local_data_1,
+                                        local_data_2,
+                                    };
+                                    // RFC 8092 section 5: duplicates are removed.
+                                    if !attributes.large_communities.contains(&community) {
+                                        attributes.large_communities.push(community);
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -322,6 +427,21 @@ impl PathAttributes {
         let four_octet = context.four_octet_autonomous_systems;
         let mut encoded: Vec<(u8, u8, BytesMut)> = Vec::new();
 
+        // What the receiver would discard on an external session is not sent
+        // there in the first place.
+        if context.session_type == SessionType::External {
+            let not_allowed = [
+                (LOCAL_PREFERENCE, self.local_preference.is_some()),
+                (ORIGINATOR_ID, self.originator_id.is_some()),
+                (CLUSTER_LIST, !self.cluster_list.is_empty()),
+            ];
+            for (type_code, present) in not_allowed {
+                if present {
+                    return Err(EncodeError::AttributeNotAllowed { type_code });
+                }
+            }
+        }
+
         if let Some(origin) = self.origin {
             let mut value = BytesMut::new();
             value.put_u8(origin.code());
@@ -355,6 +475,46 @@ impl PathAttributes {
             put_autonomous_system(aggregator.autonomous_system, four_octet, &mut value)?;
             value.put_slice(&aggregator.address.octets());
             encoded.push((AGGREGATOR, FLAG_OPTIONAL | FLAG_TRANSITIVE, value));
+        }
+        if !self.communities.is_empty() {
+            let mut value = BytesMut::new();
+            for community in &self.communities {
+                value.put_u32(community.0);
+            }
+            encoded.push((COMMUNITIES, FLAG_OPTIONAL | FLAG_TRANSITIVE, value));
+        }
+        if let Some(originator_id) = self.originator_id {
+            let mut value = BytesMut::new();
+            value.put_slice(&originator_id.octets());
+            encoded.push((ORIGINATOR_ID, FLAG_OPTIONAL, value));
+        }
+        if !self.cluster_list.is_empty() {
+            let mut value = BytesMut::new();
+            for cluster_id in &self.cluster_list {
+                value.put_slice(&cluster_id.octets());
+            }
+            encoded.push((CLUSTER_LIST, FLAG_OPTIONAL, value));
+        }
+        if !self.extended_communities.is_empty() {
+            let mut value = BytesMut::new();
+            for community in &self.extended_communities {
+                value.put_slice(&community.0);
+            }
+            encoded.push((EXTENDED_COMMUNITIES, FLAG_OPTIONAL | FLAG_TRANSITIVE, value));
+        }
+        if !self.large_communities.is_empty() {
+            let mut value = BytesMut::new();
+            for community in &self.large_communities {
+                value.put_u32(community.global_administrator);
+                value.put_u32(community.local_data_1);
+                value.put_u32(community.local_data_2);
+            }
+            encoded.push((LARGE_COMMUNITY, FLAG_OPTIONAL | FLAG_TRANSITIVE, value));
+        }
+        if let Some(only_to_customer) = self.only_to_customer {
+            let mut value = BytesMut::new();
+            value.put_u32(only_to_customer);
+            encoded.push((ONLY_TO_CUSTOMER, FLAG_OPTIONAL | FLAG_TRANSITIVE, value));
         }
         for unknown in &self.unknown {
             if expected_flags(unknown.type_code).is_some() {
@@ -419,4 +579,11 @@ fn read_attribute(reader: &mut Reader) -> Option<(u8, u8, Bytes)> {
     };
     let value = reader.take(length)?;
     Some((flags, type_code, value))
+}
+
+/// The first four octets of `octets` as a big-endian number.
+fn be_u32(octets: &[u8]) -> Option<u32> {
+    octets
+        .first_chunk::<4>()
+        .map(|chunk| u32::from_be_bytes(*chunk))
 }

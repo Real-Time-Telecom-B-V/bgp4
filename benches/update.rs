@@ -8,13 +8,13 @@ use std::hint::black_box;
 use std::net::Ipv4Addr;
 
 use bgp4::wire::{
-    AsPath, Ipv4Prefix, Origin, PathAttributes, UnknownAttribute, Update, UpdateContext,
-    HEADER_LENGTH,
+    AsPath, Community, Ipv4Prefix, LargeCommunity, Origin, PathAttributes, SessionType,
+    UnknownAttribute, Update, UpdateContext, HEADER_LENGTH,
 };
 use bytes::{Bytes, BytesMut};
 use criterion::{criterion_group, criterion_main, Criterion, Throughput};
 
-const CONTEXT: UpdateContext = UpdateContext::new(true);
+const CONTEXT: UpdateContext = UpdateContext::new(true, SessionType::External);
 
 fn announcement(prefixes: u8) -> Update {
     let mut attributes = PathAttributes::default();
@@ -22,13 +22,15 @@ fn announcement(prefixes: u8) -> Update {
     attributes.as_path = Some(AsPath::sequence([64496, 64497, 65550]));
     attributes.next_hop = Some(Ipv4Addr::new(192, 0, 2, 1));
     attributes.multi_exit_discriminator = Some(50);
+    attributes.communities.push(Community::new(64496, 100));
+    attributes.large_communities.push(LargeCommunity {
+        global_administrator: 64496,
+        local_data_1: 1,
+        local_data_2: 2,
+    });
     attributes.unknown.push(UnknownAttribute::new(
-        8,
-        Bytes::from_static(&[0xfb, 0xf0, 0x00, 0x64]),
-    ));
-    attributes.unknown.push(UnknownAttribute::new(
-        32,
-        Bytes::from_static(&[0, 0, 0xfb, 0xf0, 0, 0, 0, 1, 0, 0, 0, 2]),
+        200,
+        Bytes::from_static(&[1, 2, 3, 4]),
     ));
     let announced = (0..prefixes)
         .filter_map(|index| Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, index), 32))

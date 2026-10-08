@@ -7,6 +7,7 @@
 mod as_path;
 mod attribute;
 mod capability;
+mod community;
 mod error;
 mod header;
 mod keepalive;
@@ -21,6 +22,7 @@ pub use attribute::{
     Aggregator, AttributeError, AttributeErrorAction, Origin, PathAttributes, UnknownAttribute,
 };
 pub use capability::{AddressFamily, Capability};
+pub use community::{Community, ExtendedCommunity, LargeCommunity};
 pub use error::{DecodeError, DecodeErrorReason, EncodeError};
 pub use header::{Header, MessageType, HEADER_LENGTH, MAXIMUM_MESSAGE_LENGTH};
 pub use keepalive::Keepalive;
@@ -30,4 +32,4 @@ pub use notification::{
     UpdateError,
 };
 pub use open::Open;
-pub use update::{DecodedUpdate, Update, UpdateContext};
+pub use update::{DecodedUpdate, SessionType, Update, UpdateContext};

@@ -239,6 +239,12 @@ pub enum EncodeError {
         /// The type code.
         type_code: u8,
     },
+    /// An attribute that must not be sent on this kind of session, such as
+    /// LOCAL_PREF toward an external peer.
+    AttributeNotAllowed {
+        /// The type code.
+        type_code: u8,
+    },
 }
 
 impl fmt::Display for EncodeError {
@@ -282,6 +288,10 @@ impl fmt::Display for EncodeError {
             EncodeError::DuplicateAttribute { type_code } => {
                 write!(formatter, "attribute {type_code} appears more than once")
             }
+            EncodeError::AttributeNotAllowed { type_code } => write!(
+                formatter,
+                "attribute {type_code} is not allowed on this kind of session"
+            ),
         }
     }
 }

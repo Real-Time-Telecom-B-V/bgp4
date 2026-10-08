@@ -15,9 +15,10 @@ use std::process::Command;
 use std::net::Ipv4Addr;
 
 use bgp4::wire::{
-    AddressFamily, Aggregator, AsPath, AsPathSegment, Capability, CeaseError, ErrorCode,
-    FiniteStateMachineError, Header, Ipv4Prefix, Keepalive, Notification, Open, OpenError, Origin,
-    PathAttributes, SegmentKind, UnknownAttribute, Update, UpdateContext,
+    AddressFamily, Aggregator, AsPath, AsPathSegment, Capability, CeaseError, Community, ErrorCode,
+    ExtendedCommunity, FiniteStateMachineError, Header, Ipv4Prefix, Keepalive, LargeCommunity,
+    Notification, Open, OpenError, Origin, PathAttributes, SegmentKind, SessionType,
+    UnknownAttribute, Update, UpdateContext,
 };
 use bytes::{Bytes, BytesMut};
 
@@ -376,7 +377,7 @@ fn update_with_every_base_attribute() {
     };
     let fields = dissect(
         "update_base",
-        &encode_update(&update, UpdateContext::new(true)),
+        &encode_update(&update, UpdateContext::new(true, SessionType::Internal)),
         &[
             "bgp.type",
             "bgp.withdrawn_prefix",
@@ -451,7 +452,7 @@ fn update_with_two_octet_as_numbers_and_every_segment_kind() {
     };
     let fields = dissect(
         "update_two_octet",
-        &encode_update(&update, UpdateContext::new(false)),
+        &encode_update(&update, UpdateContext::new(false, SessionType::External)),
         &[
             "bgp.update.path_attribute.as_path_segment.type",
             "bgp.update.path_attribute.as_path_segment.length",
@@ -487,7 +488,7 @@ fn update_with_an_unknown_attribute_longer_than_255_octets() {
     };
     let fields = dissect(
         "update_unknown",
-        &encode_update(&update, UpdateContext::new(true)),
+        &encode_update(&update, UpdateContext::new(true, SessionType::External)),
         &[
             "bgp.update.path_attribute.type_code",
             "bgp.update.path_attribute.flags",
@@ -521,7 +522,7 @@ fn update_that_only_withdraws() {
     };
     let fields = dissect(
         "update_withdraw",
-        &encode_update(&update, UpdateContext::new(true)),
+        &encode_update(&update, UpdateContext::new(true, SessionType::External)),
         &[
             "bgp.length",
             "bgp.update.withdrawn_routes.length",
@@ -533,5 +534,69 @@ fn update_that_only_withdraws() {
     assert_eq!(
         fields,
         ["32", "9", "198.51.100.0,203.0.113.128", "24,25", "0"]
+    );
+}
+
+#[test]
+fn update_toward_an_internal_peer_with_communities_and_reflection_attributes() {
+    if !wireshark_available() {
+        return;
+    }
+    let mut attributes = PathAttributes::default();
+    attributes.origin = Some(Origin::Igp);
+    attributes.as_path = Some(AsPath::default());
+    attributes.next_hop = Some(Ipv4Addr::new(192, 0, 2, 1));
+    attributes.local_preference = Some(100);
+    attributes.communities = vec![Community::new(64496, 100), Community::BLACKHOLE];
+    attributes.originator_id = Some(Ipv4Addr::new(192, 0, 2, 7));
+    attributes.cluster_list = vec![Ipv4Addr::new(192, 0, 2, 8), Ipv4Addr::new(192, 0, 2, 9)];
+    attributes.extended_communities = vec![ExtendedCommunity([0x00, 0x02, 0xfb, 0xf0, 0, 0, 0, 1])];
+    attributes.large_communities = vec![LargeCommunity {
+        global_administrator: 65550,
+        local_data_1: 1,
+        local_data_2: 2,
+    }];
+    attributes.only_to_customer = Some(65551);
+    let update = Update {
+        withdrawn: Vec::new(),
+        attributes,
+        announced: vec![prefix(198, 51, 100, 0, 24)],
+    };
+    let fields = dissect(
+        "update_communities",
+        &encode_update(&update, UpdateContext::new(true, SessionType::Internal)),
+        &[
+            "bgp.update.path_attribute.type_code",
+            "bgp.update.path_attribute.flags",
+            "bgp.update.path_attribute.community_as",
+            "bgp.update.path_attribute.community_value",
+            "bgp.update.path_attribute.community_wellknown",
+            "bgp.update.path_attribute.originator_id",
+            "bgp.path_attribute.cluster_id",
+            "bgp.ext_com.value_as2",
+            "bgp.ext_com.value_an4",
+            "bgp.large_communities.ga",
+            "bgp.large_communities.ldp1",
+            "bgp.large_communities.ldp2",
+            "bgp.update.path_attribute.otc",
+        ],
+    );
+    assert_eq!(
+        fields,
+        [
+            "1,2,3,5,8,9,10,16,32,35",
+            "0x40,0x40,0x40,0x40,0xc0,0x80,0x80,0xc0,0xc0,0xc0",
+            "64496",
+            "100",
+            "0xffff029a",
+            "192.0.2.7",
+            "192.0.2.8,192.0.2.9",
+            "64496",
+            "1",
+            "65550",
+            "1",
+            "2",
+            "65551",
+        ]
     );
 }

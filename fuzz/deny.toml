@@ -1,0 +1,37 @@
+# cargo-deny policy for the fuzz crate only. The published crate is covered by
+# the deny.toml at the repository root, which stays stricter.
+# Local: `cargo deny --manifest-path fuzz/Cargo.toml check`
+
+[graph]
+targets = [
+    { triple = "x86_64-unknown-linux-gnu" },
+    { triple = "aarch64-unknown-linux-gnu" },
+]
+all-features = true
+
+[advisories]
+version = 2
+yanked = "deny"
+ignore = []
+
+[bans]
+multiple-versions = "warn"
+wildcards = "warn"
+# The fuzz crate depends on the crate under test by path.
+allow-wildcard-paths = true
+
+[licenses]
+version = 2
+allow = [
+    "MIT",
+    "Apache-2.0",
+    # libfuzzer-sys bundles LLVM's libFuzzer, which is under the NCSA licence.
+    # Allowed here and nowhere else: nothing in this crate is ever shipped.
+    "NCSA",
+]
+confidence-threshold = 0.9
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

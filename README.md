@@ -48,6 +48,13 @@ cargo test --all-features
 cargo deny check
 ```
 
+Fuzzing needs a nightly toolchain and `cargo-fuzz`:
+
+```sh
+scripts/fuzz-corpus.sh
+cargo +nightly fuzz run message
+```
+
 ## License
 
 MIT. See [LICENSE](LICENSE).

@@ -9,6 +9,7 @@ RUN apt-get update \
     && mkdir -p /run/bird
 
 COPY frr.conf /etc/frr/frr.conf
-COPY bird.conf bird-wrong-peer-as.conf bird-four-octet-as.conf /etc/bird/
+COPY bird.conf bird-wrong-peer-as.conf bird-four-octet-as.conf \
+    bird-two-octet-session.conf /etc/bird/
 
 CMD ["sleep", "infinity"]

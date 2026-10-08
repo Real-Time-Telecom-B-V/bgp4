@@ -33,10 +33,10 @@ docker network create --ipv6 --subnet 192.0.2.0/24 --gateway 192.0.2.254 \
 # IPv6 next hops in the vectors are the same on every run.
 run_node() {
     docker run -d --name "$1" --hostname "$1" --network "$network" --ip "$2" \
-        --mac-address "$3" --cap-add NET_ADMIN --cap-add NET_RAW --cap-add SYS_ADMIN "$image" >/dev/null
+        --ip6 "$4" --mac-address "$3" --cap-add NET_ADMIN --cap-add NET_RAW --cap-add SYS_ADMIN "$image" >/dev/null
 }
-run_node bgp4-frr 192.0.2.1 00:00:5e:00:53:01
-run_node bgp4-bird 192.0.2.2 00:00:5e:00:53:02
+run_node bgp4-frr 192.0.2.1 00:00:5e:00:53:01 2001:db8:0:1::11
+run_node bgp4-bird 192.0.2.2 00:00:5e:00:53:02 2001:db8:0:1::12
 
 frr() { docker exec bgp4-frr vtysh "$@"; }
 bird() { docker exec bgp4-bird birdc "$@"; }
@@ -112,6 +112,22 @@ bird enable peer >/dev/null
 wait_for_state Established
 sleep 3
 stop_capture four-octet-as
+
+# Scenario 5: BIRD does not announce the 4-octet AS capability, and FRR has a
+# 4-octet AS number in the path it sends. FRR must put AS_TRANS in AS_PATH and
+# the real path in AS4_PATH.
+frr -c 'configure terminal' -c 'router bgp 64496' -c 'neighbor 192.0.2.2 shutdown' \
+    -c 'neighbor 192.0.2.2 remote-as 64497' >/dev/null
+frr -c 'configure terminal' -c 'route-map EXPORT permit 10' \
+    -c 'set as-path prepend 65550 64496' >/dev/null
+bird disable peer >/dev/null
+bird configure '"/etc/bird/bird-two-octet-session.conf"' >/dev/null
+start_capture two-octet-session
+frr -c 'configure terminal' -c 'router bgp 64496' -c 'no neighbor 192.0.2.2 shutdown' >/dev/null
+bird enable peer >/dev/null
+wait_for_state Established
+sleep 3
+stop_capture two-octet-session
 
 {
     # First two words only: the rest of the line names the host kernel.

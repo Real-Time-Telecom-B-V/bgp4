@@ -36,9 +36,9 @@ fn announcement(prefixes: u8) -> Update {
         .filter_map(|index| Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, index), 32))
         .collect();
     Update {
-        withdrawn: Vec::new(),
         attributes,
         announced,
+        ..Update::default()
     }
 }
 

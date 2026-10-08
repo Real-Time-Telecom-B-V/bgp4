@@ -11,13 +11,13 @@ Status values: **Done**, **Partial** (see notes), **Planned**, **Not planned**.
 
 | RFC | Title | Status | Notes |
 | --- | --- | --- | --- |
-| [4271](https://www.rfc-editor.org/rfc/rfc4271) | A Border Gateway Protocol 4 (BGP-4) | Partial | Codec for all four message types, IPv4 unicast. State machine and decision process to come |
+| [4271](https://www.rfc-editor.org/rfc/rfc4271) | A Border Gateway Protocol 4 (BGP-4) | Partial | Codec for all four message types. State machine and decision process to come |
 | [5492](https://www.rfc-editor.org/rfc/rfc5492) | Capabilities Advertisement with BGP-4 | Partial | Capabilities in the OPEN codec; negotiation belongs to the session, to come |
-| [6793](https://www.rfc-editor.org/rfc/rfc6793) | BGP Support for Four-Octet Autonomous System (AS) Number Space | Partial | Capability, AS_TRANS in OPEN, 4-octet AS_PATH and AGGREGATOR. AS4_PATH and AS4_AGGREGATOR to come |
-| [4760](https://www.rfc-editor.org/rfc/rfc4760) | Multiprotocol Extensions for BGP-4 | Planned | IPv6 unicast only |
+| [6793](https://www.rfc-editor.org/rfc/rfc6793) | BGP Support for Four-Octet Autonomous System (AS) Number Space | Partial | Codec complete: capability, AS_TRANS, AS4_PATH, AS4_AGGREGATOR. Negotiation belongs to the session |
+| [4760](https://www.rfc-editor.org/rfc/rfc4760) | Multiprotocol Extensions for BGP-4 | Partial | Capability and the IPv6 unicast codec; negotiation belongs to the session, to come |
 | [5065](https://www.rfc-editor.org/rfc/rfc5065) | Autonomous System Confederations for BGP | Partial | Confederation segments in AS_PATH, rejected from external peers. Session behaviour to come |
 | [7705](https://www.rfc-editor.org/rfc/rfc7705) | Autonomous System Migration Mechanisms and Their Effects on the BGP AS_PATH Attribute | Planned | Per-session local AS, no-prepend, replace-AS |
-| [7606](https://www.rfc-editor.org/rfc/rfc7606) | Revised Error Handling for BGP UPDATE Messages | Partial | All attributes the crate interprets, including the session-dependent rules. Multiprotocol attributes to come |
+| [7606](https://www.rfc-editor.org/rfc/rfc7606) | Revised Error Handling for BGP UPDATE Messages | Partial | Every attribute the crate interprets. Acting on the outcome belongs to the session and the RIB |
 | [6286](https://www.rfc-editor.org/rfc/rfc6286) | Autonomous-System-Wide Unique BGP Identifier for BGP-4 | Partial | Zero identifier rejected in the codec; the AS-wide uniqueness rule belongs to the session |
 | [6608](https://www.rfc-editor.org/rfc/rfc6608) | Subcodes for BGP Finite State Machine Error | Partial | Subcodes in the codec; the state machine that raises them is to come |
 | [4486](https://www.rfc-editor.org/rfc/rfc4486) | Subcodes for BGP Cease Notification Message | Partial | Subcodes in the codec; sessions that send them are to come |

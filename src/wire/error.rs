@@ -52,6 +52,12 @@ pub enum DecodeErrorReason {
         /// The attribute type code.
         type_code: u8,
     },
+    /// An UPDATE whose MP_REACH_NLRI or MP_UNREACH_NLRI cannot be parsed, so
+    /// its routes cannot be found (RFC 7606 section 7.11).
+    MalformedMultiprotocolAttribute {
+        /// The attribute type code, 14 or 15.
+        type_code: u8,
+    },
 }
 
 /// A message that could not be decoded, and what to tell the peer about it.
@@ -138,6 +144,10 @@ impl DecodeError {
                 ErrorCode::Update(UpdateError::UnrecognizedWellKnownAttribute),
                 self.data.clone(),
             ),
+            DecodeErrorReason::MalformedMultiprotocolAttribute { .. } => Notification::new(
+                ErrorCode::Update(UpdateError::OptionalAttributeError),
+                self.data.clone(),
+            ),
         }
     }
 }
@@ -171,6 +181,9 @@ impl fmt::Display for DecodeError {
             DecodeErrorReason::InvalidNetworkField => write!(formatter, "invalid network field")?,
             DecodeErrorReason::UnrecognizedWellKnownAttribute { type_code } => {
                 write!(formatter, "unrecognized well-known attribute {type_code}")?
+            }
+            DecodeErrorReason::MalformedMultiprotocolAttribute { type_code } => {
+                write!(formatter, "malformed multiprotocol attribute {type_code}")?
             }
         }
         write!(formatter, " at offset {}", self.offset)
@@ -219,11 +232,6 @@ pub enum EncodeError {
         /// The number of AS numbers in the set.
         length: usize,
     },
-    /// An AS number above 65535 on a session without 4-octet AS numbers.
-    AutonomousSystemNeedsFourOctets {
-        /// The AS number that does not fit.
-        autonomous_system: u32,
-    },
     /// An UPDATE that announces a route without a mandatory attribute.
     MissingMandatoryAttribute {
         /// The type code of the absent attribute.
@@ -239,6 +247,8 @@ pub enum EncodeError {
         /// The type code.
         type_code: u8,
     },
+    /// IPv6 routes are announced without an IPv6 next hop.
+    MissingIpv6NextHop,
     /// An attribute that must not be sent on this kind of session, such as
     /// LOCAL_PREF toward an external peer.
     AttributeNotAllowed {
@@ -273,10 +283,6 @@ impl fmt::Display for EncodeError {
             EncodeError::AsSetTooLong { length } => {
                 write!(formatter, "AS set of {length} AS numbers exceeds 255")
             }
-            EncodeError::AutonomousSystemNeedsFourOctets { autonomous_system } => write!(
-                formatter,
-                "AS {autonomous_system} needs a session with 4-octet AS numbers"
-            ),
             EncodeError::MissingMandatoryAttribute { type_code } => write!(
                 formatter,
                 "announcement without mandatory attribute {type_code}"
@@ -287,6 +293,9 @@ impl fmt::Display for EncodeError {
             ),
             EncodeError::DuplicateAttribute { type_code } => {
                 write!(formatter, "attribute {type_code} appears more than once")
+            }
+            EncodeError::MissingIpv6NextHop => {
+                write!(formatter, "IPv6 announcement without an IPv6 next hop")
             }
             EncodeError::AttributeNotAllowed { type_code } => write!(
                 formatter,

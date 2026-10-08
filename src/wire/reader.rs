@@ -63,6 +63,10 @@ impl Reader {
     pub(crate) fn u32(&mut self) -> Option<u32> {
         self.take(4).map(|mut bytes| bytes.get_u32())
     }
+
+    pub(crate) fn u128(&mut self) -> Option<u128> {
+        self.take(16).map(|mut bytes| bytes.get_u128())
+    }
 }
 
 #[cfg(test)]

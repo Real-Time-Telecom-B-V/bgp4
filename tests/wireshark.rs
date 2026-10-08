@@ -12,8 +12,11 @@
 use std::fs;
 use std::process::Command;
 
+use std::net::Ipv4Addr;
+
 use bgp4::wire::{
-    CeaseError, ErrorCode, FiniteStateMachineError, Header, Keepalive, Notification, OpenError,
+    AddressFamily, Capability, CeaseError, ErrorCode, FiniteStateMachineError, Header, Keepalive,
+    Notification, Open, OpenError,
 };
 use bytes::{Bytes, BytesMut};
 
@@ -237,4 +240,104 @@ fn notification_for_a_bad_message_length() {
         ],
     );
     assert_eq!(fields, ["1", "2", "0012"]);
+}
+
+fn encode_open(open: &Open) -> Vec<u8> {
+    let mut buffer = BytesMut::new();
+    open.encode(&mut buffer).expect("encode");
+    buffer.to_vec()
+}
+
+const OPEN_FIELDS: [&str; 9] = [
+    "bgp.type",
+    "bgp.open.version",
+    "bgp.open.myas",
+    "bgp.open.holdtime",
+    "bgp.open.identifier",
+    "bgp.cap.type",
+    "bgp.cap.mp.afi",
+    "bgp.cap.mp.safi",
+    "bgp.cap.4as",
+];
+
+#[test]
+fn open_with_a_two_octet_as_number() {
+    if !wireshark_available() {
+        return;
+    }
+    let open = Open::new(
+        64496,
+        90,
+        Ipv4Addr::new(192, 0, 2, 1),
+        vec![
+            Capability::Multiprotocol(AddressFamily::IPV4_UNICAST),
+            Capability::Multiprotocol(AddressFamily::IPV6_UNICAST),
+            Capability::RouteRefresh,
+        ],
+    );
+    let fields = dissect("open_two_octet", &encode_open(&open), &OPEN_FIELDS);
+    assert_eq!(
+        fields,
+        [
+            "1",
+            "4",
+            "64496",
+            "90",
+            "192.0.2.1",
+            "1,1,2,65",
+            "1,2",
+            "1,1",
+            "64496"
+        ]
+    );
+}
+
+#[test]
+fn open_with_a_four_octet_as_number_puts_as_trans_in_the_fixed_field() {
+    if !wireshark_available() {
+        return;
+    }
+    let open = Open::new(
+        65550,
+        0,
+        Ipv4Addr::new(198, 51, 100, 7),
+        vec![Capability::Multiprotocol(AddressFamily::IPV6_UNICAST)],
+    );
+    let fields = dissect("open_four_octet", &encode_open(&open), &OPEN_FIELDS);
+    assert_eq!(
+        fields,
+        [
+            "1",
+            "4",
+            "23456",
+            "0",
+            "198.51.100.7",
+            "1,65",
+            "2",
+            "1",
+            "65550"
+        ]
+    );
+}
+
+#[test]
+fn open_carries_an_unknown_capability_untouched() {
+    if !wireshark_available() {
+        return;
+    }
+    let open = Open::new(
+        64496,
+        90,
+        Ipv4Addr::new(192, 0, 2, 1),
+        vec![Capability::Unknown {
+            code: 200,
+            value: Bytes::from_static(&[0xde, 0xad, 0xbe, 0xef]),
+        }],
+    );
+    let fields = dissect(
+        "open_unknown_capability",
+        &encode_open(&open),
+        &["bgp.cap.type", "bgp.cap.length", "bgp.cap.unknown"],
+    );
+    assert_eq!(fields, ["200,65", "4,4", "deadbeef"]);
 }

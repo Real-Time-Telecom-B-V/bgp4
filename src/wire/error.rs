@@ -4,7 +4,7 @@ use std::fmt;
 
 use bytes::Bytes;
 
-use super::notification::{ErrorCode, MessageHeaderError, Notification};
+use super::notification::{ErrorCode, MessageHeaderError, Notification, OpenError};
 
 /// Why a message could not be decoded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -23,6 +23,25 @@ pub enum DecodeErrorReason {
         /// The type octet as received.
         message_type: u8,
     },
+    /// An OPEN with a version other than 4.
+    UnsupportedVersionNumber {
+        /// The version octet as received.
+        version: u8,
+    },
+    /// An OPEN proposing a hold time of 1 or 2 seconds.
+    UnacceptableHoldTime {
+        /// The hold time as received.
+        hold_time: u16,
+    },
+    /// An OPEN with a BGP identifier of zero (RFC 6286).
+    BadBgpIdentifier,
+    /// An OPEN with an optional parameter other than capabilities.
+    UnsupportedOptionalParameter {
+        /// The parameter type as received.
+        parameter_type: u8,
+    },
+    /// An OPEN whose optional parameters or capabilities cannot be parsed.
+    MalformedOpen,
 }
 
 /// A message that could not be decoded, and what to tell the peer about it.
@@ -65,6 +84,27 @@ impl DecodeError {
                 ErrorCode::MessageHeader(MessageHeaderError::BadMessageType),
                 Bytes::copy_from_slice(&[message_type]),
             ),
+            // The data is the largest version this speaker supports, in 2 octets.
+            DecodeErrorReason::UnsupportedVersionNumber { .. } => Notification::new(
+                ErrorCode::Open(OpenError::UnsupportedVersionNumber),
+                Bytes::from_static(&[0, 4]),
+            ),
+            DecodeErrorReason::UnacceptableHoldTime { .. } => Notification::new(
+                ErrorCode::Open(OpenError::UnacceptableHoldTime),
+                Bytes::new(),
+            ),
+            DecodeErrorReason::BadBgpIdentifier => {
+                Notification::new(ErrorCode::Open(OpenError::BadBgpIdentifier), Bytes::new())
+            }
+            DecodeErrorReason::UnsupportedOptionalParameter { .. } => Notification::new(
+                ErrorCode::Open(OpenError::UnsupportedOptionalParameter),
+                Bytes::new(),
+            ),
+            // RFC 4271 section 6.2: a recognised but malformed optional
+            // parameter is reported with subcode 0.
+            DecodeErrorReason::MalformedOpen => {
+                Notification::new(ErrorCode::Open(OpenError::Unspecific), Bytes::new())
+            }
         }
     }
 }
@@ -81,6 +121,17 @@ impl fmt::Display for DecodeError {
             DecodeErrorReason::BadMessageType { message_type } => {
                 write!(formatter, "bad message type {message_type}")?
             }
+            DecodeErrorReason::UnsupportedVersionNumber { version } => {
+                write!(formatter, "unsupported version {version}")?
+            }
+            DecodeErrorReason::UnacceptableHoldTime { hold_time } => {
+                write!(formatter, "unacceptable hold time {hold_time}")?
+            }
+            DecodeErrorReason::BadBgpIdentifier => write!(formatter, "bad BGP identifier")?,
+            DecodeErrorReason::UnsupportedOptionalParameter { parameter_type } => {
+                write!(formatter, "unsupported optional parameter {parameter_type}")?
+            }
+            DecodeErrorReason::MalformedOpen => write!(formatter, "malformed OPEN")?,
         }
         write!(formatter, " at offset {}", self.offset)
     }
@@ -102,6 +153,25 @@ pub enum EncodeError {
         /// The length of the rejected text in octets.
         length: usize,
     },
+    /// A hold time of 1 or 2 seconds, which every receiver must reject.
+    UnacceptableHoldTime {
+        /// The rejected hold time.
+        hold_time: u16,
+    },
+    /// A BGP identifier of zero, which every receiver must reject.
+    ZeroBgpIdentifier,
+    /// The capabilities do not fit in the 255 octets of optional parameters.
+    OptionalParametersTooLong {
+        /// The length the optional parameters would have had.
+        length: usize,
+    },
+    /// The value of a capability is longer than 255 octets.
+    CapabilityTooLong {
+        /// The capability code.
+        code: u8,
+        /// The length of the rejected value.
+        length: usize,
+    },
 }
 
 impl fmt::Display for EncodeError {
@@ -113,6 +183,18 @@ impl fmt::Display for EncodeError {
             EncodeError::ShutdownCommunicationTooLong { length } => write!(
                 formatter,
                 "shutdown communication of {length} octets exceeds 255"
+            ),
+            EncodeError::UnacceptableHoldTime { hold_time } => {
+                write!(formatter, "hold time of {hold_time} seconds is not allowed")
+            }
+            EncodeError::ZeroBgpIdentifier => write!(formatter, "BGP identifier is zero"),
+            EncodeError::OptionalParametersTooLong { length } => write!(
+                formatter,
+                "optional parameters of {length} octets exceed 255"
+            ),
+            EncodeError::CapabilityTooLong { code, length } => write!(
+                formatter,
+                "capability {code} value of {length} octets exceeds 255"
             ),
         }
     }

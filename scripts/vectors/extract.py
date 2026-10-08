@@ -58,7 +58,9 @@ def main():
     for stale in output.glob("*.hex"):
         stale.unlink()
     for pcap in sorted(source.glob("*.pcap")):
-        counter = 0
+        # Numbered per sender and type, so that a rerun in which the two
+        # directions interleave differently does not rename every file.
+        counters = {}
         for stream in range(stream_count(pcap)):
             buffers = {}
             order = []
@@ -69,9 +71,10 @@ def main():
                 buffers[sender] += payload
             for sender in order:
                 for message in split_messages(buffers[sender]):
-                    counter += 1
                     kind = TYPE_NAMES.get(message[18], f"type{message[18]}")
-                    name = f"{pcap.stem}-{counter:02d}-{SENDERS[sender]}-{kind}.hex"
+                    key = (SENDERS[sender], kind)
+                    counters[key] = counters.get(key, 0) + 1
+                    name = f"{pcap.stem}-{key[0]}-{kind}-{counters[key]:02d}.hex"
                     (output / name).write_text(message.hex() + "\n")
     (output / "VERSIONS").write_text((source / "versions.txt").read_text())
 

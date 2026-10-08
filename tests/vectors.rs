@@ -34,7 +34,7 @@ fn load(name: &str) -> Vec<u8> {
     decode_hex(&fs::read_to_string(&path).unwrap_or_else(|error| panic!("{path:?}: {error}")))
 }
 
-/// Every captured vector as (file name, bytes).
+/// Every captured vector as (file name, bytes), sorted by file name.
 fn all_vectors() -> Vec<(String, Vec<u8>)> {
     let mut vectors = Vec::new();
     for entry in fs::read_dir(vector_directory()).expect("vector directory") {
@@ -49,6 +49,9 @@ fn all_vectors() -> Vec<(String, Vec<u8>)> {
         }
     }
     assert!(vectors.len() >= 10, "vector set looks incomplete");
+    // Directory order is up to the file system. Sorted by name, the messages
+    // of one sender and type are in the order they were sent.
+    vectors.sort();
     vectors
 }
 

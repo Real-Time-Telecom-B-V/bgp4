@@ -1,0 +1,240 @@
+//! Encoder tests: what this crate emits is handed to Wireshark's BGP
+//! dissector, and the fields it reads back are asserted.
+//!
+//! A round-trip through our own decoder would share any bug with the encoder;
+//! Wireshark does not. A field that comes back empty or a `[Malformed]` flag is
+//! an encoder bug.
+//!
+//! Needs `text2pcap` and `tshark`. Without them the tests are skipped with a
+//! message, unless `BGP4_REQUIRE_WIRESHARK` is set (CI sets it), in which case
+//! they fail.
+
+use std::fs;
+use std::process::Command;
+
+use bgp4::wire::{
+    CeaseError, ErrorCode, FiniteStateMachineError, Header, Keepalive, Notification, OpenError,
+};
+use bytes::{Bytes, BytesMut};
+
+fn wireshark_available() -> bool {
+    let present = |program: &str| {
+        Command::new(program)
+            .arg("--version")
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false)
+    };
+    if present("text2pcap") && present("tshark") {
+        return true;
+    }
+    if std::env::var_os("BGP4_REQUIRE_WIRESHARK").is_some() {
+        panic!("BGP4_REQUIRE_WIRESHARK is set but text2pcap/tshark are not installed");
+    }
+    eprintln!("SKIPPED: text2pcap/tshark not installed, encoder not validated");
+    false
+}
+
+/// Dissect one BGP message and return the requested fields, in order.
+fn dissect(name: &str, message: &[u8], fields: &[&str]) -> Vec<String> {
+    // The system temporary directory, not the target directory: a confined
+    // tshark (AppArmor, snap) is often not allowed to read under $HOME.
+    let directory = std::env::temp_dir().join(format!("bgp4-wireshark-{}", std::process::id()));
+    fs::create_dir_all(&directory).expect("create scratch directory");
+    let dump = directory.join(format!("{name}.txt"));
+    let capture = directory.join(format!("{name}.pcap"));
+
+    let hex: Vec<String> = message.iter().map(|octet| format!("{octet:02x}")).collect();
+    fs::write(&dump, format!("000000 {}\n", hex.join(" "))).expect("write hex dump");
+
+    let converted = Command::new("text2pcap")
+        .args(["-q", "-T", "179,179"])
+        .arg(&dump)
+        .arg(&capture)
+        .output()
+        .expect("run text2pcap");
+    assert!(
+        converted.status.success(),
+        "text2pcap failed: {converted:?}"
+    );
+
+    let mut command = Command::new("tshark");
+    command
+        .arg("-r")
+        .arg(&capture)
+        .args(["-T", "fields", "-E", "separator=|"]);
+    for field in fields.iter().chain(&["_ws.malformed"]) {
+        command.args(["-e", field]);
+    }
+    let output = command.output().expect("run tshark");
+    assert!(output.status.success(), "tshark failed: {output:?}");
+    let _ = fs::remove_file(&dump);
+    let _ = fs::remove_file(&capture);
+
+    let line = String::from_utf8(output.stdout).expect("utf-8 from tshark");
+    let mut values: Vec<String> = line
+        .trim_end_matches('\n')
+        .split('|')
+        .map(str::to_owned)
+        .collect();
+    assert_eq!(
+        values.len(),
+        fields.len() + 1,
+        "unexpected output: {line:?}"
+    );
+    let malformed = values.pop().expect("malformed column");
+    assert_eq!(malformed, "", "Wireshark flagged the message as malformed");
+    values
+}
+
+fn encode(notification: &Notification) -> Vec<u8> {
+    let mut buffer = BytesMut::new();
+    notification.encode(&mut buffer).expect("encode");
+    buffer.to_vec()
+}
+
+#[test]
+fn keepalive() {
+    if !wireshark_available() {
+        return;
+    }
+    let mut buffer = BytesMut::new();
+    Keepalive.encode(&mut buffer);
+    let fields = dissect("keepalive", &buffer, &["bgp.type", "bgp.length"]);
+    assert_eq!(fields, ["4", "19"]);
+}
+
+#[test]
+fn cease_administrative_shutdown_with_communication() {
+    if !wireshark_available() {
+        return;
+    }
+    let notification =
+        Notification::administrative_shutdown("maintenance window").expect("communication fits");
+    let fields = dissect(
+        "cease_shutdown",
+        &encode(&notification),
+        &[
+            "bgp.type",
+            "bgp.length",
+            "bgp.notify.major_error",
+            "bgp.notify.minor_error_cease",
+            "bgp.notify.communication_length",
+            "bgp.notify.communication",
+        ],
+    );
+    assert_eq!(fields, ["3", "40", "6", "2", "18", "maintenance window"]);
+}
+
+#[test]
+fn cease_administrative_reset_with_communication() {
+    if !wireshark_available() {
+        return;
+    }
+    let notification = Notification::administrative_reset("new policy").expect("fits");
+    let fields = dissect(
+        "cease_reset",
+        &encode(&notification),
+        &[
+            "bgp.notify.major_error",
+            "bgp.notify.minor_error_cease",
+            "bgp.notify.communication",
+        ],
+    );
+    assert_eq!(fields, ["6", "4", "new policy"]);
+}
+
+#[test]
+fn cease_without_data() {
+    if !wireshark_available() {
+        return;
+    }
+    let notification = Notification::new(
+        ErrorCode::Cease(CeaseError::ConnectionCollisionResolution),
+        Bytes::new(),
+    );
+    let fields = dissect(
+        "cease_collision",
+        &encode(&notification),
+        &[
+            "bgp.length",
+            "bgp.notify.major_error",
+            "bgp.notify.minor_error_cease",
+        ],
+    );
+    assert_eq!(fields, ["21", "6", "7"]);
+}
+
+#[test]
+fn open_error_bad_peer_as() {
+    if !wireshark_available() {
+        return;
+    }
+    let notification = Notification::new(
+        ErrorCode::Open(OpenError::BadPeerAs),
+        Bytes::copy_from_slice(&64496u32.to_be_bytes()),
+    );
+    let fields = dissect(
+        "open_bad_peer_as",
+        &encode(&notification),
+        &[
+            "bgp.notify.major_error",
+            "bgp.notify.minor_error_open",
+            "bgp.notify.error_open.bad_peer_as",
+        ],
+    );
+    assert_eq!(fields, ["2", "2", "64496"]);
+}
+
+#[test]
+fn hold_timer_expired() {
+    if !wireshark_available() {
+        return;
+    }
+    let notification = Notification::new(ErrorCode::HoldTimerExpired, Bytes::new());
+    let fields = dissect(
+        "hold_timer_expired",
+        &encode(&notification),
+        &["bgp.notify.major_error", "bgp.notify.minor_error_expired"],
+    );
+    assert_eq!(fields, ["4", "0"]);
+}
+
+#[test]
+fn finite_state_machine_error() {
+    if !wireshark_available() {
+        return;
+    }
+    let notification = Notification::new(
+        ErrorCode::FiniteStateMachine(FiniteStateMachineError::UnexpectedMessageInOpenConfirm),
+        Bytes::new(),
+    );
+    let fields = dissect(
+        "fsm_error",
+        &encode(&notification),
+        &["bgp.notify.major_error", "bgp.notify.minor_error_state"],
+    );
+    assert_eq!(fields, ["5", "2"]);
+}
+
+/// The notification derived from a header decode error is itself well formed:
+/// the reaction to a bad length is a Bad Message Length carrying that length.
+#[test]
+fn notification_for_a_bad_message_length() {
+    if !wireshark_available() {
+        return;
+    }
+    let mut bad = vec![0xff; 16];
+    bad.extend_from_slice(&[0x00, 0x12, 0x04]); // KEEPALIVE claiming 18 octets
+    let error = Header::decode(&bad).expect_err("length below the minimum");
+    let fields = dissect(
+        "bad_message_length",
+        &encode(&error.notification()),
+        &[
+            "bgp.notify.major_error",
+            "bgp.notify.minor_error",
+            "bgp.notify.minor_data",
+        ],
+    );
+    assert_eq!(fields, ["1", "2", "0012"]);
+}

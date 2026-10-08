@@ -98,6 +98,19 @@ bird enable peer >/dev/null
 sleep 8
 stop_capture wrong-peer-as
 
+# Scenario 4: BIRD speaks under a 4-octet AS number, so its OPEN carries
+# AS_TRANS in the 2-octet field and the real number in the capability.
+frr -c 'configure terminal' -c 'router bgp 64496' -c 'neighbor 192.0.2.2 shutdown' \
+    -c 'neighbor 192.0.2.2 remote-as 65550' >/dev/null
+bird disable peer >/dev/null
+bird configure '"/etc/bird/bird-four-octet-as.conf"' >/dev/null
+start_capture four-octet-as
+frr -c 'configure terminal' -c 'router bgp 64496' -c 'no neighbor 192.0.2.2 shutdown' >/dev/null
+bird enable peer >/dev/null
+wait_for_state Established
+sleep 3
+stop_capture four-octet-as
+
 {
     # First two words only: the rest of the line names the host kernel.
     docker exec bgp4-frr vtysh -c 'show version' | head -1 | cut -d' ' -f1,2

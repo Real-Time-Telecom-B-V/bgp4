@@ -75,7 +75,12 @@ sleep 2
 start_capture frr-shutdown
 frr -c 'configure terminal' -c 'router bgp 64496' -c 'no neighbor 192.0.2.2 shutdown' >/dev/null
 wait_for_state Established
-sleep 8
+sleep 6
+# Each side asks the other to send its routes again: a ROUTE-REFRESH for IPv4
+# unicast from FRR, and one per address family from BIRD.
+frr -c 'clear bgp ipv4 unicast 192.0.2.2 soft in' >/dev/null
+bird reload in peer >/dev/null
+sleep 2
 frr -c 'configure terminal' -c 'router bgp 64496' \
     -c 'neighbor 192.0.2.2 shutdown message maintenance window' >/dev/null
 stop_capture frr-shutdown

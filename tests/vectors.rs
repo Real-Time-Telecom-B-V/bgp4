@@ -13,6 +13,7 @@ use bgp4::wire::{
     Ipv4Prefix, Ipv6NextHop, Ipv6Prefix, Keepalive, LargeCommunity, MessageType, Notification,
     Open, OpenError, Origin, SessionType, Update, UpdateContext, HEADER_LENGTH,
 };
+use bgp4::wire::{Message, RouteRefresh, RouteRefreshSubtype};
 use bytes::Bytes;
 
 fn vector_directory() -> PathBuf {
@@ -70,6 +71,8 @@ fn every_captured_header_decodes_to_the_type_and_length_on_the_wire() {
             MessageType::Notification
         } else if name.contains("-keepalive-") {
             MessageType::Keepalive
+        } else if name.contains("-route-refresh-") {
+            MessageType::RouteRefresh
         } else {
             panic!("{name}: unexpected message type in the file name")
         };
@@ -431,4 +434,79 @@ fn frr_as4_path_is_merged_back_into_the_path() {
 fn bird_two_octet_as_path() {
     let update = update_announcing("two-octet-session", "bird", prefix(203, 0, 113, 0, 24));
     assert_eq!(update.attributes.as_path, Some(AsPath::sequence([64497])));
+}
+
+fn route_refreshes(sender: &str) -> Vec<RouteRefresh> {
+    let stem = format!("frr-shutdown-{sender}-route-refresh-");
+    all_vectors()
+        .into_iter()
+        .filter(|(name, _)| name.starts_with(&stem))
+        .map(|(name, bytes)| {
+            RouteRefresh::decode(body(&bytes)).unwrap_or_else(|error| panic!("{name}: {error}"))
+        })
+        .collect()
+}
+
+fn refresh(address_family: AddressFamily, subtype: RouteRefreshSubtype) -> RouteRefresh {
+    RouteRefresh {
+        address_family,
+        subtype,
+    }
+}
+
+/// The capture script runs `clear bgp ipv4 unicast 192.0.2.2 soft in` on FRR
+/// and `reload in peer` on BIRD. Both routers negotiated enhanced route
+/// refresh with each other, so each answers the other's request by marking
+/// the beginning and the end of the refresh.
+#[test]
+fn route_refresh_requests_and_markers() {
+    let frr = route_refreshes("frr");
+    let bird = route_refreshes("bird");
+    let request = RouteRefreshSubtype::Request;
+    let begin = RouteRefreshSubtype::BeginOfRefresh;
+    let end = RouteRefreshSubtype::EndOfRefresh;
+
+    // FRR asks for IPv4 unicast only, BIRD for both families.
+    let requests = |messages: &[RouteRefresh]| -> Vec<AddressFamily> {
+        messages
+            .iter()
+            .filter(|message| message.subtype == request)
+            .map(|message| message.address_family)
+            .collect()
+    };
+    assert_eq!(requests(&frr), [AddressFamily::IPV4_UNICAST]);
+    assert_eq!(
+        requests(&bird),
+        [AddressFamily::IPV4_UNICAST, AddressFamily::IPV6_UNICAST]
+    );
+
+    // Each answers what the other asked for.
+    for family in [AddressFamily::IPV4_UNICAST, AddressFamily::IPV6_UNICAST] {
+        assert!(frr.contains(&refresh(family, begin)), "{family:?}");
+        assert!(frr.contains(&refresh(family, end)), "{family:?}");
+    }
+    assert!(bird.contains(&refresh(AddressFamily::IPV4_UNICAST, begin)));
+    assert!(bird.contains(&refresh(AddressFamily::IPV4_UNICAST, end)));
+    assert!(!bird.contains(&refresh(AddressFamily::IPV6_UNICAST, begin)));
+}
+
+/// Every captured message goes through the one entry point a session uses,
+/// and comes out as the variant its file name says.
+#[test]
+fn every_captured_message_decodes_through_the_single_entry_point() {
+    for (name, bytes) in all_vectors() {
+        let message = Message::decode(Bytes::copy_from_slice(&bytes), context(&name))
+            .unwrap_or_else(|error| panic!("{name}: {error}"));
+        let matches = match message {
+            Message::Open(_) => name.contains("-open-"),
+            Message::Update(decoded) => {
+                assert_eq!(decoded.errors, [], "{name}");
+                name.contains("-update-")
+            }
+            Message::Notification(_) => name.contains("-notification-"),
+            Message::Keepalive => name.contains("-keepalive-"),
+            Message::RouteRefresh(_) => name.contains("-route-refresh-"),
+        };
+        assert!(matches, "{name}");
+    }
 }

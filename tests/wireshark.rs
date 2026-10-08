@@ -20,6 +20,7 @@ use bgp4::wire::{
     Keepalive, LargeCommunity, Notification, Open, OpenError, Origin, PathAttributes, SegmentKind,
     SessionType, UnknownAttribute, Update, UpdateContext,
 };
+use bgp4::wire::{RouteRefresh, RouteRefreshSubtype};
 use bytes::{Bytes, BytesMut};
 
 fn wireshark_available() -> bool {
@@ -709,4 +710,92 @@ fn update_with_a_four_octet_as_number_on_a_two_octet_session() {
             "192.0.2.9,192.0.2.9",
         ]
     );
+}
+
+#[test]
+fn route_refresh() {
+    if !wireshark_available() {
+        return;
+    }
+    for (address_family, subtype, expected) in [
+        (
+            AddressFamily::IPV4_UNICAST,
+            RouteRefreshSubtype::Request,
+            ["5", "23", "1", "0", "1"],
+        ),
+        (
+            AddressFamily::IPV6_UNICAST,
+            RouteRefreshSubtype::EndOfRefresh,
+            ["5", "23", "2", "2", "1"],
+        ),
+    ] {
+        let mut buffer = BytesMut::new();
+        RouteRefresh {
+            address_family,
+            subtype,
+        }
+        .encode(&mut buffer);
+        let fields = dissect(
+            "route_refresh",
+            &buffer,
+            &[
+                "bgp.type",
+                "bgp.length",
+                "bgp.route_refresh.afi",
+                "bgp.route_refresh.subtype",
+                "bgp.route_refresh.safi",
+            ],
+        );
+        assert_eq!(fields, expected);
+    }
+}
+
+/// An UPDATE with more routes than fit in one message is split, and every
+/// resulting message is a well-formed UPDATE carrying the same attributes.
+#[test]
+fn an_oversized_update_is_split_into_well_formed_messages() {
+    if !wireshark_available() {
+        return;
+    }
+    let mut attributes = PathAttributes::default();
+    attributes.origin = Some(Origin::Igp);
+    attributes.as_path = Some(AsPath::sequence([64496]));
+    attributes.next_hop = Some(Ipv4Addr::new(192, 0, 2, 1));
+    attributes.communities = vec![Community::new(64496, 100)];
+    // 1500 host routes at 5 octets each cannot fit in 4096 octets.
+    let announced: Vec<Ipv4Prefix> = (0..1500u32)
+        .map(|index| {
+            let [_, _, high, low] = index.to_be_bytes();
+            prefix(198, 51, high + 100, low, 32)
+        })
+        .collect();
+    let update = Update {
+        attributes,
+        announced,
+        ..Update::default()
+    };
+    let mut buffer = BytesMut::new();
+    let count = update
+        .encode_split(UpdateContext::new(true, SessionType::External), &mut buffer)
+        .expect("split");
+    assert_eq!(count, 2);
+
+    let first_length = usize::from(u16::from_be_bytes([buffer[16], buffer[17]]));
+    let (first, second) = buffer.split_at(first_length);
+    let mut seen = 0;
+    for (name, message) in [("split_first", first), ("split_second", second)] {
+        let fields = dissect(
+            name,
+            message,
+            &[
+                "bgp.type",
+                "bgp.update.path_attribute.type_code",
+                "bgp.update.path_attribute.community_as",
+                "bgp.nlri_prefix",
+            ],
+        );
+        assert_eq!(fields[..3], ["2", "1,2,3,8", "64496"], "{name}");
+        seen += fields[3].split(',').count();
+    }
+    assert_eq!(seen, 1500);
 }

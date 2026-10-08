@@ -11,10 +11,12 @@ mod community;
 mod error;
 mod header;
 mod keepalive;
+mod message;
 mod nlri;
 mod notification;
 mod open;
 mod reader;
+mod route_refresh;
 mod update;
 
 pub use as_path::{AsPath, AsPathSegment, SegmentKind};
@@ -26,10 +28,12 @@ pub use community::{Community, ExtendedCommunity, LargeCommunity};
 pub use error::{DecodeError, DecodeErrorReason, EncodeError};
 pub use header::{Header, MessageType, HEADER_LENGTH, MAXIMUM_MESSAGE_LENGTH};
 pub use keepalive::Keepalive;
+pub use message::Message;
 pub use nlri::{Ipv4Prefix, Ipv6NextHop, Ipv6Prefix};
 pub use notification::{
     CeaseError, ErrorCode, FiniteStateMachineError, MessageHeaderError, Notification, OpenError,
     UpdateError,
 };
 pub use open::Open;
+pub use route_refresh::{RouteRefresh, RouteRefreshSubtype};
 pub use update::{DecodedUpdate, SessionType, Update, UpdateContext};

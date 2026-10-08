@@ -29,12 +29,14 @@ docker build -q -t "$image" "$here" >/dev/null
 docker network create --ipv6 --subnet 192.0.2.0/24 --gateway 192.0.2.254 \
     --subnet 2001:db8:0:1::/64 "$network" >/dev/null
 
+# MAC addresses from the documentation range of RFC 7042, so the link-local
+# IPv6 next hops in the vectors are the same on every run.
 run_node() {
     docker run -d --name "$1" --hostname "$1" --network "$network" --ip "$2" \
-        --cap-add NET_ADMIN --cap-add NET_RAW --cap-add SYS_ADMIN "$image" >/dev/null
+        --mac-address "$3" --cap-add NET_ADMIN --cap-add NET_RAW --cap-add SYS_ADMIN "$image" >/dev/null
 }
-run_node bgp4-frr 192.0.2.1
-run_node bgp4-bird 192.0.2.2
+run_node bgp4-frr 192.0.2.1 00:00:5e:00:53:01
+run_node bgp4-bird 192.0.2.2 00:00:5e:00:53:02
 
 frr() { docker exec bgp4-frr vtysh "$@"; }
 bird() { docker exec bgp4-bird birdc "$@"; }

@@ -9,8 +9,8 @@ use std::net::Ipv4Addr;
 use std::path::PathBuf;
 
 use bgp4::wire::{
-    AddressFamily, Capability, CeaseError, ErrorCode, Header, Keepalive, MessageType, Notification,
-    Open, OpenError, HEADER_LENGTH,
+    AddressFamily, AsPath, Capability, CeaseError, ErrorCode, Header, Ipv4Prefix, Keepalive,
+    MessageType, Notification, Open, OpenError, Origin, Update, UpdateContext, HEADER_LENGTH,
 };
 use bytes::Bytes;
 
@@ -193,4 +193,136 @@ fn bird_open_under_a_four_octet_as_number_uses_as_trans() {
     let open = open("four-octet-as-bird-open-01.hex");
     assert_eq!(open.my_autonomous_system(), 23456);
     assert_eq!(open.autonomous_system(), 65550);
+}
+
+const FOUR_OCTET: UpdateContext = UpdateContext::new(true);
+
+fn update(name: &str) -> Update {
+    let bytes = load(name);
+    let decoded =
+        Update::decode(body(&bytes), FOUR_OCTET).unwrap_or_else(|error| panic!("{name}: {error}"));
+    assert_eq!(decoded.errors, [], "{name}");
+    decoded.update
+}
+
+fn prefix(a: u8, b: u8, c: u8, d: u8, length: u8) -> Ipv4Prefix {
+    Ipv4Prefix::new(Ipv4Addr::new(a, b, c, d), length).expect("valid prefix")
+}
+
+/// The update among `<scenario>-<sender>-update-NN.hex` that announces `wanted`.
+fn update_announcing(scenario: &str, sender: &str, wanted: Ipv4Prefix) -> Update {
+    let stem = format!("{scenario}-{sender}-update-");
+    let mut found = Vec::new();
+    for (name, _) in all_vectors() {
+        if name.starts_with(&stem) {
+            let update = update(&name);
+            if update.announced.contains(&wanted) {
+                found.push(update);
+            }
+        }
+    }
+    assert_eq!(found.len(), 1, "{stem}*: updates announcing {wanted}");
+    found.remove(0)
+}
+
+#[test]
+fn every_captured_update_decodes_without_a_single_error() {
+    let mut seen = 0;
+    for (name, _) in all_vectors() {
+        if name.contains("-update-") {
+            update(&name);
+            seen += 1;
+        }
+    }
+    assert!(seen >= 20, "expected updates from every scenario");
+}
+
+/// scripts/vectors/frr.conf: network 198.51.100.0/24, exported with metric 50,
+/// one AS prepended, and three kinds of communities.
+#[test]
+fn frr_announcement() {
+    let update = update_announcing("frr-shutdown", "frr", prefix(198, 51, 100, 0, 24));
+    assert_eq!(update.announced, [prefix(198, 51, 100, 0, 24)]);
+    assert!(update.withdrawn.is_empty());
+    let attributes = &update.attributes;
+    assert_eq!(attributes.origin, Some(Origin::Igp));
+    assert_eq!(attributes.as_path, Some(AsPath::sequence([64496, 64496])));
+    assert_eq!(attributes.next_hop, Some(Ipv4Addr::new(192, 0, 2, 1)));
+    assert_eq!(attributes.multi_exit_discriminator, Some(50));
+    assert_eq!(attributes.local_preference, None);
+    assert!(!attributes.atomic_aggregate);
+    assert_eq!(attributes.aggregator, None);
+
+    // COMMUNITIES (8), EXTENDED COMMUNITIES (16) and LARGE_COMMUNITY (32) are
+    // optional transitive attributes this crate does not interpret yet. They
+    // have to come through byte for byte, marked partial.
+    let unknown: Vec<(u8, bool, &[u8])> = attributes
+        .unknown
+        .iter()
+        .map(|attribute| {
+            (
+                attribute.type_code(),
+                attribute.partial(),
+                attribute.value().as_ref(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        unknown,
+        [
+            // In the order FRR sends them, which is not ascending.
+            // 64496:100
+            (8, true, &[0xfb, 0xf0, 0x00, 0x64][..]),
+            // 64496:1:2
+            (32, true, &[0, 0, 0xfb, 0xf0, 0, 0, 0, 1, 0, 0, 0, 2][..]),
+            // rt 64496:1, a 2-octet AS route target
+            (16, true, &[0x00, 0x02, 0xfb, 0xf0, 0, 0, 0, 1][..]),
+        ]
+    );
+}
+
+/// scripts/vectors/bird.conf: static 203.0.113.0/24, exported with MED 70.
+#[test]
+fn bird_announcement() {
+    let update = update_announcing("frr-shutdown", "bird", prefix(203, 0, 113, 0, 24));
+    let attributes = &update.attributes;
+    assert_eq!(attributes.origin, Some(Origin::Igp));
+    assert_eq!(attributes.as_path, Some(AsPath::sequence([64497])));
+    assert_eq!(attributes.next_hop, Some(Ipv4Addr::new(192, 0, 2, 2)));
+    assert_eq!(attributes.multi_exit_discriminator, Some(70));
+    let unknown: Vec<u8> = attributes
+        .unknown
+        .iter()
+        .map(|attribute| attribute.type_code())
+        .collect();
+    assert_eq!(unknown, [8, 32]);
+}
+
+/// FRR passes BIRD's route back with its own AS in front, prepended once more
+/// by the export route map.
+#[test]
+fn frr_readvertises_the_route_it_learned() {
+    let update = update_announcing("frr-shutdown", "frr", prefix(203, 0, 113, 0, 24));
+    assert_eq!(
+        update.attributes.as_path,
+        Some(AsPath::sequence([64496, 64496, 64497]))
+    );
+}
+
+#[test]
+fn bird_as_path_under_a_four_octet_as_number() {
+    let update = update_announcing("four-octet-as", "bird", prefix(203, 0, 113, 0, 24));
+    assert_eq!(update.attributes.as_path, Some(AsPath::sequence([65550])));
+}
+
+#[test]
+fn end_of_rib_marker_is_an_empty_update() {
+    let mut seen = 0;
+    for (name, bytes) in all_vectors() {
+        if name.contains("-update-") && bytes.len() == HEADER_LENGTH + 4 {
+            assert_eq!(update(&name), Update::default(), "{name}");
+            seen += 1;
+        }
+    }
+    assert!(seen >= 2, "expected an end-of-RIB marker from each side");
 }

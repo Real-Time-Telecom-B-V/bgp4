@@ -31,6 +31,11 @@ impl Reader {
         self.bytes.is_empty()
     }
 
+    /// Everything not yet read, without consuming it.
+    pub(crate) fn rest(&self) -> Bytes {
+        self.bytes.clone()
+    }
+
     /// The next `count` octets, without copying them.
     pub(crate) fn take(&mut self, count: usize) -> Option<Bytes> {
         if count > self.bytes.len() {

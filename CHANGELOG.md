@@ -50,3 +50,5 @@ the rules in [VERSIONING.md](VERSIONING.md).
 - `wire`: `Message::decode` decodes a whole message of any type.
 - `wire`: `Update::encode_split` writes an UPDATE as several messages when its
   routes do not fit in one.
+- Fuzz targets for the wire codec (`fuzz/`, cargo-fuzz), seeded from the
+  captured messages and run in CI.

@@ -1,0 +1,42 @@
+# Fuzz targets for the wire codec, run with cargo-fuzz on a nightly toolchain:
+#   cargo +nightly fuzz run message
+#
+# This is a crate of its own, outside the published package. libfuzzer-sys
+# compiles LLVM's libFuzzer from C++ source and never reaches users of bgp4.
+[package]
+name = "bgp4-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+bgp4 = { path = ".." }
+bytes = "1"
+libfuzzer-sys = "0.4"
+
+[[bin]]
+name = "message"
+path = "fuzz_targets/message.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "open"
+path = "fuzz_targets/open.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "update"
+path = "fuzz_targets/update.rs"
+test = false
+doc = false
+bench = false
+
+# Keep this crate out of any workspace above it.
+[workspace]

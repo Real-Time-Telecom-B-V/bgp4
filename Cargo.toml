@@ -12,7 +12,7 @@ homepage = "https://github.com/Real-Time-Telecom-B-V/bgp4"
 keywords = ["bgp", "bgp4", "routing", "network", "telecom"]
 categories = ["network-programming"]
 # Keep CI/build scaffolding out of the crates.io package.
-exclude = [".github/", "docs/", "scripts/"]
+exclude = [".github/", "docs/", "fuzz/", "scripts/"]
 
 [dependencies]
 bytes = "1"

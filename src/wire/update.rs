@@ -7,7 +7,7 @@ use super::attribute::{
     LOCAL_PREFERENCE, NEXT_HOP, ORIGIN,
 };
 use super::error::{DecodeError, DecodeErrorReason, EncodeError};
-use super::header::{Header, MessageType, HEADER_LENGTH};
+use super::header::{Header, MessageType, HEADER_LENGTH, MAXIMUM_MESSAGE_LENGTH};
 use super::nlri::{Ipv4Prefix, Ipv6NextHop, Ipv6Prefix};
 use super::notification::UpdateError;
 use super::reader::Reader;
@@ -231,11 +231,123 @@ impl Update {
         buffer.put_slice(&announced);
         Ok(())
     }
+    /// Append the UPDATE as one message when it fits, as several when it does
+    /// not, and return how many were written.
+    ///
+    /// Only the routes are divided. Withdrawals go out first, without
+    /// attributes; then the announcements, IPv4 and IPv6 apart, each message
+    /// with the full set of attributes. Nothing is written on an error,
+    /// which includes attributes so large that no route fits beside them.
+    pub fn encode_split(
+        &self,
+        context: UpdateContext,
+        buffer: &mut BytesMut,
+    ) -> Result<usize, EncodeError> {
+        let mut whole = BytesMut::new();
+        match self.encode(context, &mut whole) {
+            Ok(()) => {
+                buffer.put_slice(&whole);
+                return Ok(1);
+            }
+            Err(EncodeError::MessageTooLong { .. }) => {}
+            Err(error) => return Err(error),
+        }
+
+        let mut messages = BytesMut::new();
+        let mut count = 0;
+        count += split_routes(
+            &self.withdrawn,
+            Ipv4Prefix::encoded_length,
+            |withdrawn| Update {
+                withdrawn,
+                ..Update::default()
+            },
+            context,
+            &mut messages,
+        )?;
+        count += split_routes(
+            &self.ipv6_withdrawn,
+            Ipv6Prefix::encoded_length,
+            |ipv6_withdrawn| Update {
+                ipv6_withdrawn,
+                ..Update::default()
+            },
+            context,
+            &mut messages,
+        )?;
+        count += split_routes(
+            &self.announced,
+            Ipv4Prefix::encoded_length,
+            |announced| Update {
+                attributes: self.attributes.clone(),
+                announced,
+                ..Update::default()
+            },
+            context,
+            &mut messages,
+        )?;
+        count += split_routes(
+            &self.ipv6_announced,
+            Ipv6Prefix::encoded_length,
+            |ipv6_announced| Update {
+                attributes: self.attributes.clone(),
+                ipv6_next_hop: self.ipv6_next_hop,
+                ipv6_announced,
+                ..Update::default()
+            },
+            context,
+            &mut messages,
+        )?;
+        buffer.put_slice(&messages);
+        Ok(count)
+    }
+}
+
+/// Write `routes` as a run of UPDATE messages, each as full as it can be, and
+/// return how many there were. `build` makes the UPDATE for one share.
+fn split_routes<Prefix: Copy>(
+    routes: &[Prefix],
+    encoded_length: impl Fn(&Prefix) -> usize,
+    build: impl Fn(Vec<Prefix>) -> Update,
+    context: UpdateContext,
+    buffer: &mut BytesMut,
+) -> Result<usize, EncodeError> {
+    let Some(first) = routes.first() else {
+        return Ok(0);
+    };
+    // A message with a single route shows what everything but the routes
+    // costs. One octet is held back: a multiprotocol attribute that grows past
+    // 255 octets needs a second length octet.
+    let mut probe = BytesMut::new();
+    build(vec![*first]).encode(context, &mut probe)?;
+    let overhead = probe.len() - encoded_length(first) + 1;
+    let room = MAXIMUM_MESSAGE_LENGTH.saturating_sub(overhead);
+
+    let mut count = 0;
+    let mut share: Vec<Prefix> = Vec::new();
+    let mut used = 0;
+    for route in routes {
+        let length = encoded_length(route);
+        if length > room {
+            return Err(EncodeError::MessageTooLong {
+                length: overhead + length,
+            });
+        }
+        if used + length > room {
+            build(std::mem::take(&mut share)).encode(context, buffer)?;
+            count += 1;
+            used = 0;
+        }
+        share.push(*route);
+        used += length;
+    }
+    build(share).encode(context, buffer)?;
+    Ok(count + 1)
 }
 
 #[cfg(test)]
 mod tests {
-    use std::net::Ipv4Addr;
+    use std::net::{Ipv4Addr, Ipv6Addr};
 
     use super::*;
     use crate::wire::{
@@ -1310,5 +1422,113 @@ mod tests {
         assert_eq!(type_codes(&update), [1, 2, 3]);
         update.attributes.as_path = Some(AsPath::sequence([64496, 65550]));
         assert_eq!(type_codes(&update), [1, 2, 3, 17]);
+    }
+
+    /// Decode every message in `wire` and add the routes up.
+    fn collect(wire: &[u8], context: UpdateContext) -> (usize, Update) {
+        let mut rest = Bytes::copy_from_slice(wire);
+        let mut total = Update::default();
+        let mut count = 0;
+        while !rest.is_empty() {
+            let header = Header::decode(&rest)
+                .expect("valid header")
+                .expect("complete");
+            assert!(usize::from(header.length()) <= MAXIMUM_MESSAGE_LENGTH);
+            let message = rest.split_to(usize::from(header.length()));
+            let decoded = Update::decode(message.slice(HEADER_LENGTH..), context).expect("valid");
+            assert_eq!(decoded.errors, []);
+            let update = decoded.update;
+            if !update.announced.is_empty() || !update.ipv6_announced.is_empty() {
+                total.attributes = update.attributes;
+            }
+            if update.ipv6_next_hop.is_some() {
+                total.ipv6_next_hop = update.ipv6_next_hop;
+            }
+            total.withdrawn.extend(update.withdrawn);
+            total.announced.extend(update.announced);
+            total.ipv6_withdrawn.extend(update.ipv6_withdrawn);
+            total.ipv6_announced.extend(update.ipv6_announced);
+            count += 1;
+        }
+        (count, total)
+    }
+
+    fn host_routes(count: u16, third_octet_base: u8) -> Vec<Ipv4Prefix> {
+        (0..count)
+            .filter_map(|index| {
+                let [high, low] = index.to_be_bytes();
+                Ipv4Prefix::new(Ipv4Addr::new(198, 51, third_octet_base + high, low), 32)
+            })
+            .collect()
+    }
+
+    fn ipv6_host_routes(count: u16, group: u16) -> Vec<Ipv6Prefix> {
+        (0..count)
+            .filter_map(|index| {
+                Ipv6Prefix::new(Ipv6Addr::new(0x2001, 0xdb8, group, 0, 0, 0, 0, index), 128)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn an_update_that_fits_is_not_split() {
+        let update = announcement();
+        let mut split = BytesMut::new();
+        assert_eq!(update.encode_split(TWO_OCTET, &mut split), Ok(1));
+        assert_eq!(split.to_vec(), encode(&update).expect("valid"));
+    }
+
+    #[test]
+    fn a_split_update_loses_and_invents_nothing() {
+        let mut update = announcement();
+        update.withdrawn = host_routes(1000, 110);
+        update.announced = host_routes(2000, 100);
+        update.ipv6_withdrawn = ipv6_host_routes(300, 0x300);
+        update.ipv6_announced = ipv6_host_routes(500, 0x100);
+        update.ipv6_next_hop = Some(Ipv6NextHop {
+            global: "2001:db8:0:1::11".parse().expect("address"),
+            link_local: None,
+        });
+        assert!(matches!(
+            encode(&update),
+            Err(EncodeError::MessageTooLong { .. })
+        ));
+
+        let mut wire = BytesMut::new();
+        let count = update
+            .encode_split(TWO_OCTET, &mut wire)
+            .expect("splittable");
+        let (decoded_count, total) = collect(&wire, TWO_OCTET);
+        assert_eq!(count, decoded_count);
+        // 5000 + 10000 + 5100 + 8500 octets of prefixes need at least 8 messages.
+        assert!(count >= 8, "{count} messages");
+        assert_eq!(total, update);
+    }
+
+    #[test]
+    fn attributes_that_leave_no_room_for_a_route_cannot_be_split() {
+        let mut update = announcement();
+        update
+            .attributes
+            .unknown
+            .push(UnknownAttribute::new(200, Bytes::from(vec![0; 4060])));
+        update.announced = host_routes(2, 100);
+        let mut wire = BytesMut::new();
+        assert!(matches!(
+            update.encode_split(TWO_OCTET, &mut wire),
+            Err(EncodeError::MessageTooLong { .. })
+        ));
+        assert!(wire.is_empty());
+    }
+
+    #[test]
+    fn other_encode_errors_are_not_mistaken_for_a_size_problem() {
+        let mut update = announcement();
+        update.attributes.origin = None;
+        let mut wire = BytesMut::new();
+        assert_eq!(
+            update.encode_split(TWO_OCTET, &mut wire),
+            Err(EncodeError::MissingMandatoryAttribute { type_code: 1 })
+        );
     }
 }

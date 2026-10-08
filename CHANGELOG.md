@@ -44,3 +44,9 @@ the rules in [VERSIONING.md](VERSIONING.md).
 - `wire`: sessions without 4-octet AS numbers (RFC 6793). The encoder sends
   AS_TRANS with AS4_PATH and AS4_AGGREGATOR when an AS number needs them, and
   the decoder merges them back into the path and the aggregator.
+- `wire`: ROUTE-REFRESH codec (RFC 2918). The subtype octet of RFC 7313 is
+  read and written faithfully, though the crate does not announce enhanced
+  route refresh.
+- `wire`: `Message::decode` decodes a whole message of any type.
+- `wire`: `Update::encode_split` writes an UPDATE as several messages when its
+  routes do not fit in one.

@@ -11,7 +11,7 @@ Status values: **Done**, **Partial** (see notes), **Planned**, **Not planned**.
 
 | RFC | Title | Status | Notes |
 | --- | --- | --- | --- |
-| [4271](https://www.rfc-editor.org/rfc/rfc4271) | A Border Gateway Protocol 4 (BGP-4) | Partial | Codec for all four message types. State machine and decision process to come |
+| [4271](https://www.rfc-editor.org/rfc/rfc4271) | A Border Gateway Protocol 4 (BGP-4) | Partial | Codec complete for all message types. State machine and decision process to come |
 | [5492](https://www.rfc-editor.org/rfc/rfc5492) | Capabilities Advertisement with BGP-4 | Partial | Capabilities in the OPEN codec; negotiation belongs to the session, to come |
 | [6793](https://www.rfc-editor.org/rfc/rfc6793) | BGP Support for Four-Octet Autonomous System (AS) Number Space | Partial | Codec complete: capability, AS_TRANS, AS4_PATH, AS4_AGGREGATOR. Negotiation belongs to the session |
 | [4760](https://www.rfc-editor.org/rfc/rfc4760) | Multiprotocol Extensions for BGP-4 | Partial | Capability and the IPv6 unicast codec; negotiation belongs to the session, to come |
@@ -35,7 +35,7 @@ Status values: **Done**, **Partial** (see notes), **Planned**, **Not planned**.
 
 | RFC | Title | Status | Notes |
 | --- | --- | --- | --- |
-| [2918](https://www.rfc-editor.org/rfc/rfc2918) | Route Refresh Capability for BGP-4 | Planned | |
+| [2918](https://www.rfc-editor.org/rfc/rfc2918) | Route Refresh Capability for BGP-4 | Partial | Capability and message codec; sending and answering requests belongs to the speaker, to come |
 | [4456](https://www.rfc-editor.org/rfc/rfc4456) | BGP Route Reflection: An Alternative to Full Mesh Internal BGP (IBGP) | Partial | ORIGINATOR_ID and CLUSTER_LIST codec. Loop checks to come; no built-in reflector |
 | [9234](https://www.rfc-editor.org/rfc/rfc9234) | Route Leak Prevention and Detection Using Roles in UPDATE and OPEN Messages | Partial | Only-to-Customer attribute codec. Role capability and the leak checks to come |
 | [4724](https://www.rfc-editor.org/rfc/rfc4724) | Graceful Restart Mechanism for BGP | Planned | |

@@ -44,6 +44,11 @@ impl Ipv4Prefix {
         usize::from(length).div_ceil(8)
     }
 
+    /// Octets this prefix takes on the wire.
+    pub(crate) fn encoded_length(&self) -> usize {
+        1 + Self::octets(self.length)
+    }
+
     /// Append the prefix as a length octet and the minimum number of octets.
     pub(crate) fn encode(&self, buffer: &mut BytesMut) {
         buffer.put_u8(self.length);
@@ -111,6 +116,11 @@ impl Ipv6Prefix {
     /// The prefix length in bits.
     pub fn length(&self) -> u8 {
         self.length
+    }
+
+    /// Octets this prefix takes on the wire.
+    pub(crate) fn encoded_length(&self) -> usize {
+        1 + usize::from(self.length).div_ceil(8)
     }
 
     /// Append the prefix as a length octet and the minimum number of octets.

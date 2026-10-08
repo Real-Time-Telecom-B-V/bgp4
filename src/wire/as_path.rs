@@ -75,6 +75,16 @@ impl AsPath {
         }
     }
 
+    /// Whether the path has an AS_CONFED_SEQUENCE or AS_CONFED_SET segment.
+    pub fn has_confederation_segments(&self) -> bool {
+        self.segments.iter().any(|segment| {
+            matches!(
+                segment.kind,
+                SegmentKind::ConfederationSequence | SegmentKind::ConfederationSet
+            )
+        })
+    }
+
     /// Decode the attribute value. `None` when it is malformed: an unknown
     /// segment type, an empty segment, or a segment cut short (RFC 7606
     /// section 7.2).

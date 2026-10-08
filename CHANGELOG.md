@@ -30,3 +30,11 @@ the rules in [VERSIONING.md](VERSIONING.md).
   lengths, orders attributes by type code, and refuses an announcement
   without its mandatory attributes.
 - Criterion bench for UPDATE encode and decode.
+- `wire`: COMMUNITIES, EXTENDED COMMUNITIES (carried, not interpreted),
+  LARGE_COMMUNITY, ORIGINATOR_ID, CLUSTER_LIST and Only-to-Customer
+  attributes, with the well-known community values of RFC 1997, 7999 and 8326.
+- `wire`: the UPDATE codec now knows the kind of session (internal,
+  confederation-external, external). LOCAL_PREF, ORIGINATOR_ID and
+  CLUSTER_LIST are discarded when received from an external peer and refused
+  when sent to one, LOCAL_PREF is mandatory on internal sessions, and
+  confederation segments from an external peer make the AS_PATH malformed.

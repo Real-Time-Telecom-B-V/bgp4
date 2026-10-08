@@ -36,6 +36,18 @@ jobs:
         with:
           command: check bans licenses sources
 
+  # The fuzz crate has its own dependency graph and its own, looser policy
+  # (fuzz/deny.toml). It is never shipped, so this is not a required check.
+  cargo-deny-fuzz:
+    name: cargo-deny-fuzz
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          manifest-path: fuzz/Cargo.toml
+          command: check bans licenses sources
+
   advisories:
     name: advisories
     # Never on a pull request: see the header.
@@ -48,6 +60,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
         with:
+          command: check advisories
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          manifest-path: fuzz/Cargo.toml
           command: check advisories
 
       # A failed scheduled run is easy to miss, so make it something with an

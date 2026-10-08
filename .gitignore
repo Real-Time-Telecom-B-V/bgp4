@@ -1,0 +1,15 @@
+/target
+**/*.rs.bk
+*.pdb
+
+# Profiling artifacts
+perf.data
+perf.data.old
+flamegraph.svg
+
+# Scratch captures produced by the validation scripts
+*.pcap
+*.pcapng
+
+# Internal planning / request docs (keep out of the public repo)
+dev/

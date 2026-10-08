@@ -1,0 +1,96 @@
+# .github/workflows/release.yaml — publish to crates.io + GitHub Release on tag push.
+#
+# A pure-Rust library, so this is the minimal slice of a release pipeline:
+#   * verify-version — the git tag is the single source of truth; refuse to
+#     publish if Cargo.toml's version doesn't match the tag.
+#   * crates-io      — publish via OIDC Trusted Publishing (no stored token).
+#   * sbom           — SPDX + CycloneDX, attached to the release.
+#   * github-release — notes + SBOMs.
+# No Docker image and no binary tarball — there is no binary to ship.
+#
+# PREREQUISITE for the crates-io job: own `bgp4` on crates.io and configure
+# Trusted Publishing (OIDC) on the crate, pointing at this repo + this workflow.
+# Trusted Publishing cannot create a crate, so the very first publish is manual.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: read
+
+jobs:
+  verify-version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Cargo version must equal the tag
+        run: |
+          tag_version="${GITHUB_REF_NAME#v}"
+          cargo_version="$(grep -m1 '^version = ' Cargo.toml | sed -E 's/^version = "(.*)"/\1/')"
+          echo "tag=$tag_version cargo=$cargo_version"
+          if [ "$tag_version" != "$cargo_version" ]; then
+            echo "::error::Cargo.toml version ($cargo_version) does not match tag ($tag_version) — bump version in the release commit."
+            exit 1
+          fi
+
+  crates-io:
+    needs: verify-version
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write # mint a short-lived crates.io token via GitHub OIDC — no stored secret
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Authenticate to crates.io (OIDC Trusted Publishing)
+        uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1.0.5
+        id: auth
+      - name: Publish
+        run: cargo publish --locked
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+
+  sbom:
+    needs: verify-version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Install cargo-sbom
+        run: cargo install cargo-sbom
+      - name: Generate SPDX + CycloneDX SBOMs
+        run: |
+          cargo sbom --output-format spdx_json_2_3 > "bgp4-${GITHUB_REF_NAME}.spdx.json"
+          cargo sbom --output-format cyclone_dx_json_1_4 > "bgp4-${GITHUB_REF_NAME}.cdx.json"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sbom
+          path: |
+            bgp4-*.spdx.json
+            bgp4-*.cdx.json
+
+  github-release:
+    needs: [crates-io, sbom]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the release and upload assets
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Download SBOMs
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
+        with:
+          generate_release_notes: true
+          files: |
+            artifacts/*.spdx.json
+            artifacts/*.cdx.json

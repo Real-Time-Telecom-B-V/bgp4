@@ -1,0 +1,23 @@
+[package]
+name = "bgp4"
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.89"
+description = "Pure-Rust BGP-4 speaker library"
+authors = ["Real Time Telecom B.V."]
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/Real-Time-Telecom-B-V/bgp4"
+homepage = "https://github.com/Real-Time-Telecom-B-V/bgp4"
+keywords = ["bgp", "bgp4", "routing", "network", "telecom"]
+categories = ["network-programming"]
+# Keep CI/build scaffolding out of the crates.io package.
+exclude = [".github/", "docs/", "scripts/"]
+
+[dependencies]
+
+[lints.clippy]
+# Bug-catching tier denied; CI additionally runs clippy with `-D warnings`.
+correctness = { level = "deny", priority = -1 }
+await_holding_lock = "deny"
+await_holding_refcell_ref = "deny"

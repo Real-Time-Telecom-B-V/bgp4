@@ -33,8 +33,17 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
 
+      # The encoder tests hand our bytes to Wireshark's dissector. They skip
+      # when tshark is missing, so CI insists on it.
+      - name: Install tshark
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends tshark
+
       - name: Test
         run: cargo test --all-features
+        env:
+          BGP4_REQUIRE_WIRESHARK: "1"
 
       # Keep the benchmarks compiling.
       - name: Benches compile
